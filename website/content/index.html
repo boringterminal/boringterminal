@@ -13,30 +13,6 @@
   <p class="fineprint">GPU-rendered · macOS 13+ · open source</p>
 </section>
 
-<dialog id="download-modal" data-dmg="{{DMG_URL}}">
-  <div class="modal-title">
-    <h2>Downloading Boring Terminal</h2>
-    <button class="modal-close" aria-label="Close">×</button>
-  </div>
-  <p class="muted">Version {{VERSION}}, a universal DMG for macOS 13 and
-  later. If the download did not start,
-  <a href="{{DMG_URL}}">download it directly</a> or get it from the
-  <a href="{{RELEASES_URL}}">GitHub releases</a>.</p>
-  <h3>First launch</h3>
-  <p>Releases are not yet notarized, so Gatekeeper refuses a plain
-  double-click the first time. Any one of these works, once:</p>
-  <ul>
-    <li><strong>macOS 13 and 14:</strong> Control-click the app in Finder,
-    choose <strong>Open</strong>, then confirm.</li>
-    <li><strong>macOS 15 and later:</strong> double-click once and dismiss
-    the warning, then open <strong>System Settings › Privacy &amp;
-    Security</strong> and click <strong>Open Anyway</strong>.</li>
-    <li><strong>From a terminal:</strong>
-    <pre><code>xattr -dr com.apple.quarantine "/Applications/Boring Terminal.app"</code></pre></li>
-  </ul>
-  <p class="muted">More detail in the <a href="/docs/install/">install docs</a>.</p>
-</dialog>
-
 <section class="shot">
   <img src="/assets/session-management.gif" alt="Managing sessions in Boring Terminal" loading="lazy">
 </section>

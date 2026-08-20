@@ -68,6 +68,32 @@ function parseFrontmatter(source) {
 
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 
+function downloadModal() {
+  return `<dialog id="download-modal" data-dmg="${SITE.dmg}">
+  <div class="modal-title">
+    <h2>Downloading Boring Terminal</h2>
+    <button class="modal-close" aria-label="Close">×</button>
+  </div>
+  <p class="muted">Version ${SITE.version}, a universal DMG for macOS 13 and
+  later. If the download did not start,
+  <a href="${SITE.dmg}">download it directly</a> or get it from the
+  <a href="${SITE.download}">GitHub releases</a>.</p>
+  <h3>First launch</h3>
+  <p>Releases are not yet notarized, so Gatekeeper refuses a plain
+  double-click the first time. Any one of these works, once:</p>
+  <ul>
+    <li><strong>macOS 13 and 14:</strong> Control-click the app in Finder,
+    choose <strong>Open</strong>, then confirm.</li>
+    <li><strong>macOS 15 and later:</strong> double-click once and dismiss
+    the warning, then open <strong>System Settings › Privacy &amp;
+    Security</strong> and click <strong>Open Anyway</strong>.</li>
+    <li><strong>From a terminal:</strong>
+    <pre><code>xattr -dr com.apple.quarantine "/Applications/Boring Terminal.app"</code></pre></li>
+  </ul>
+  <p class="muted">More detail in the <a href="/docs/install/">install docs</a>.</p>
+</dialog>`;
+}
+
 function shell({ title, description, body, bodyClass = '' }) {
   return `<!doctype html>
 <html lang="en">
@@ -84,6 +110,7 @@ function shell({ title, description, body, bodyClass = '' }) {
 </head>
 <body class="${bodyClass}">
 ${body}
+${downloadModal()}
 <script src="/site.js" defer></script>
 </body>
 </html>
@@ -99,7 +126,7 @@ function header(active) {
     <nav>
       ${link('/docs/introduction/', 'docs', 'docs')}
       <a href="${SITE.repo}">github</a>
-      <a class="dl" href="${SITE.download}">download</a>
+      <a class="dl" href="${SITE.download}" data-download>download</a>
     </nav>
   </div>
 </header>`;
