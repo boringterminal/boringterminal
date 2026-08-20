@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "encoder.legacy.physical-f-committed-text",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "regression",
+    "source": "Boring Terminal fx committed-text regression",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["An overview", "Legacy key event encoding"],
+    "regression": "fx physical-codepoint events must preserve AppKit committed text"
+  },
+  "steps": [{ "event": { "code": "codepoint", "codepoint": 102, "text_hex": "66" } }],
+  "expect": { "pty_hex": "66" }
+}

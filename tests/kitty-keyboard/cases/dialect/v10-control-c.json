@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "dialect.v10.control-c-stays-semantic",
+  "layer": "dialect",
+  "provenance": {
+    "kind": "regression",
+    "source": "Retained-dialect committed-text downgrade binding guard",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Legacy ctrl mapping of ASCII keys"],
+    "regression": "raw downgrade must not turn Ctrl-C into literal committed text"
+  },
+  "dialect": 10,
+  "steps": [{ "event": {
+    "code": "codepoint",
+    "codepoint": 99,
+    "modifiers": { "control": true },
+    "text_hex": "03"
+  } }],
+  "expect": {
+    "dispatches": ["key"],
+    "request_payload_hexes": ["2a0000000000000000000463000000"],
+    "pty_hex": "03"
+  }
+}

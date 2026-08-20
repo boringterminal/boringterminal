@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "encoder.disambiguate.control-a",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Disambiguate escape codes"]
+  },
+  "initial": { "flags": 1 },
+  "steps": [{ "event": {
+    "code": "codepoint",
+    "codepoint": 97,
+    "modifiers": { "control": true },
+    "text_hex": "01"
+  } }],
+  "expect": { "pty_hex": "1b5b39373b3575" }
+}

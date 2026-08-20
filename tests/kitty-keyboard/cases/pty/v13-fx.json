@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "pty.v13.fx-raw-mode",
+  "layer": "pty",
+  "provenance": {
+    "kind": "regression",
+    "source": "Boring Terminal retained-dialect committed-text regression",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["An overview", "Legacy key event encoding"],
+    "regression": "v13 raw downgrade must remain byte-transparent through a PTY"
+  },
+  "dialect": 13,
+  "steps": [
+    { "event": { "code": "codepoint", "codepoint": 102, "text_hex": "66" } },
+    { "event": { "code": "codepoint", "codepoint": 120, "text_hex": "78" } }
+  ],
+  "expect": {
+    "dispatches": ["write", "write"],
+    "request_payload_hexes": [
+      "2a000000000000000100000066",
+      "2a000000000000000100000078"
+    ],
+    "pty_hex": "6678"
+  }
+}

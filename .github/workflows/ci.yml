@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "website/**"
+  pull_request:
+    paths-ignore:
+      - "website/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: Test and package macOS
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Run unit and integration tests
+        run: zig build test -Dportable-system-goldens=true
+
+      - name: Run Kitty keyboard conformance ratchet
+        run: zig build kitty-keyboard-conformance
+
+      - name: Run terminal conformance ratchet
+        run: zig build esctest
+
+      - name: Build universal DMG
+        run: ./scripts/package-macos.sh
+
+      - name: Verify disk image
+        run: hdiutil verify zig-out/release/*.dmg
+
+      - name: Upload universal build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: boring-terminal-macos-universal
+          path: |
+            zig-out/release/*.dmg
+            zig-out/release/*.sha256
+          if-no-files-found: error
+          retention-days: 14

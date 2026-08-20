@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "encoder.alternate.base-with-empty-shift",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Report alternate keys"]
+  },
+  "initial": { "flags": 13 },
+  "steps": [{ "event": {
+    "code": "codepoint",
+    "codepoint": 1092,
+    "base_layout_codepoint": 99,
+    "modifiers": { "control": true }
+  } }],
+  "expect": { "pty_hex": "1b5b313039323a3a39393b3575" }
+}

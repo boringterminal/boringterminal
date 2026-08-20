@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rotate Daemon Compatibility"
+  short_description: "Rotate retained daemon protocol capsules"
+  default_prompt: "Use $rotate-daemon-compat to rotate Boring Terminal’s retained daemon dialect capsules for the next release."

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "dialect.v13.pure-ime-raw",
+  "layer": "dialect",
+  "provenance": {
+    "kind": "rfc-policy",
+    "source": "Honest retained-dialect downgrade for pure committed text",
+    "rfc": "RFC 0019: First retained migrations v10/v13 daemons to v15 viewer"
+  },
+  "dialect": 13,
+  "steps": [{ "event": { "code": "text", "text_hex": "e4bda0e5a5bd" } }],
+  "expect": {
+    "dispatches": ["write"],
+    "request_payload_hexes": ["2a0000000000000006000000e4bda0e5a5bd"],
+    "pty_hex": "e4bda0e5a5bd"
+  }
+}

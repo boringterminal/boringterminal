@@ -1,0 +1,2 @@
+# ID<TAB>owning RFC section<TAB>reason
+# No exclusions. Checked-in corpus cases must pass when introduced.

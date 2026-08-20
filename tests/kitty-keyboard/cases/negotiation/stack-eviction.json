@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "negotiation.stack-eviction",
+  "layer": "negotiation",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Progressive enhancement"]
+  },
+  "steps": [{
+    "feed_hex": "1b5b3e31751b5b3e32751b5b3e33751b5b3e34751b5b3e35751b5b3e36751b5b3e37751b5b3e38751b5b3c37751b5b3f751b5b3c751b5b3f75"
+  }],
+  "split_every_byte": true,
+  "expect": {
+    "flags": 0,
+    "pty_hex": "1b5b3f31751b5b3f3075"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "matrix.modifier-powerset",
+  "layer": "matrix",
+  "matrix": "modifier_powerset",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Modifiers", "Report all keys as escape codes"]
+  }
+}

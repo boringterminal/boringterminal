@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "encoder.report-all.release-without-events-suppressed",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Report all keys as escape codes", "Event types"]
+  },
+  "initial": { "flags": 8 },
+  "steps": [{ "event": { "code": "codepoint", "codepoint": 97, "action": "release" } }],
+  "expect": { "suppressed": true }
+}

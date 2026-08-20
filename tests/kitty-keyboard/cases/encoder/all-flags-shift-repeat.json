@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "encoder.all-flags.shift-a-repeat-associated",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["An overview", "Event types", "Text as code points"]
+  },
+  "initial": { "flags": 31 },
+  "steps": [{ "event": {
+    "code": "codepoint",
+    "codepoint": 97,
+    "shifted_codepoint": 65,
+    "modifiers": { "shift": true },
+    "action": "repeat",
+    "text_hex": "41"
+  } }],
+  "expect": { "pty_hex": "1b5b39373a36353b323a323b363575" }
+}

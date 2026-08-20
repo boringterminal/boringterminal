@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "encoder.flag-four.direct-text-stays-text",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Report alternate keys"]
+  },
+  "initial": { "flags": 4 },
+  "steps": [{ "event": {
+    "code": "codepoint",
+    "codepoint": 61,
+    "shifted_codepoint": 43,
+    "modifiers": { "shift": true },
+    "text_hex": "2b"
+  } }],
+  "expect": { "pty_hex": "2b" }
+}

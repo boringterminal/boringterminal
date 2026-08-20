@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "matrix.codec-boundaries",
+  "layer": "matrix",
+  "matrix": "codec_boundaries",
+  "provenance": {
+    "kind": "rfc-policy",
+    "source": "Bounded semantic input transaction validation contract",
+    "rfc": "RFC 0013: Kitty keyboard conformance completion amendment"
+  }
+}

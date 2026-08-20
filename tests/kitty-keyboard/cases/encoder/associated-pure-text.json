@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "encoder.associated.pure-text",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Text as code points", "Report associated text"]
+  },
+  "initial": { "flags": 24 },
+  "steps": [{ "event": { "code": "text", "text_hex": "c3a5" } }],
+  "expect": { "pty_hex": "1b5b303b3b32323975" }
+}

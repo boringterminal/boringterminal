@@ -1,0 +1,4 @@
+interface:
+  display_name: "Boring Terminal Release"
+  short_description: "Prepare and publish verified macOS releases"
+  default_prompt: "Use $release-boring-terminal to prepare or publish the next Boring Terminal release."

@@ -1,0 +1,31 @@
+# Zig build products and caches
+/.zig-cache/
+/zig-out/
+/zig-pkg/
+
+# macOS filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local diagnostics
+/LOOP.md
+*.log
+*.dSYM/
+*.profraw
+*.profdata
+__pycache__/
+*.py[cod]
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
