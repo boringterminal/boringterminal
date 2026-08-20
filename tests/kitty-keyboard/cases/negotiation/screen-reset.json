@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "negotiation.screen-isolation-ris-reset",
+  "layer": "negotiation",
+  "provenance": {
+    "kind": "rfc-policy",
+    "source": "Boring Terminal per-screen keyboard stacks and reset policy",
+    "rfc": "RFC 0002: Kitty keyboard protocol; Phase 2 keyboard amendment"
+  },
+  "steps": [{ "feed_hex": "1b5b3d31751b5b3f31303439681b5b3f751b5b3e32751b5b3f751b5b3f313034396c1b5b3f751b631b5b3f751b5b3f31303439681b5b3f75" }],
+  "split_every_byte": true,
+  "expect": {
+    "flags": 0,
+    "pty_hex": "1b5b3f30751b5b3f32751b5b3f31751b5b3f30751b5b3f3075"
+  }
+}

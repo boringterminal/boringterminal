@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "negotiation.replace-set-clear-push-pop",
+  "layer": "negotiation",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Progressive enhancement"]
+  },
+  "steps": [{ "feed_hex": "1b5b3d39751b5b3f751b5b3d333b32751b5b3f751b5b3d363b33751b5b3f751b5b3e32751b5b3f751b5b3c751b5b3f751b5b3c3939751b5b3f75" }],
+  "split_every_byte": true,
+  "expect": {
+    "flags": 0,
+    "pty_hex": "1b5b3f39751b5b3f3131751b5b3f39751b5b3f32751b5b3f39751b5b3f3075"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "encoder.report-all.pure-ime-fallback",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "rfc-policy",
+    "source": "Preserve pure committed text when associated-text reporting is unavailable",
+    "rfc": "RFC 0013: Kitty keyboard phase 2 amendment"
+  },
+  "initial": { "flags": 8 },
+  "steps": [{ "event": { "code": "text", "text_hex": "e4bda0e5a5bd" } }],
+  "expect": { "pty_hex": "e4bda0e5a5bd" }
+}

@@ -1,0 +1,77 @@
+<main class="col landing-col">
+
+<section class="hero">
+  {{HERO_MARK}}
+  <h1>Boring Terminal</h1>
+  <p class="tagline">A calm, fast macOS terminal built around long-running
+  sessions. Shells, builds, coding agents: keep them all running, and see at
+  a glance which one needs you.</p>
+  <p class="actions">
+    <a class="button primary" href="{{RELEASES_URL}}" data-download>Download for macOS</a>
+    <a class="button ghost" href="/docs/introduction/">Read the docs</a>
+  </p>
+  <p class="fineprint">GPU-rendered · macOS 13+ · open source</p>
+</section>
+
+<dialog id="download-modal" data-dmg="{{DMG_URL}}">
+  <div class="modal-title">
+    <h2>Downloading Boring Terminal</h2>
+    <button class="modal-close" aria-label="Close">×</button>
+  </div>
+  <p class="muted">Version {{VERSION}}, a universal DMG for macOS 13 and
+  later. If the download did not start,
+  <a href="{{DMG_URL}}">download it directly</a> or get it from the
+  <a href="{{RELEASES_URL}}">GitHub releases</a>.</p>
+  <h3>First launch</h3>
+  <p>Releases are not yet notarized, so Gatekeeper refuses a plain
+  double-click the first time. Any one of these works, once:</p>
+  <ul>
+    <li><strong>macOS 13 and 14:</strong> Control-click the app in Finder,
+    choose <strong>Open</strong>, then confirm.</li>
+    <li><strong>macOS 15 and later:</strong> double-click once and dismiss
+    the warning, then open <strong>System Settings › Privacy &amp;
+    Security</strong> and click <strong>Open Anyway</strong>.</li>
+    <li><strong>From a terminal:</strong>
+    <pre><code>xattr -dr com.apple.quarantine "/Applications/Boring Terminal.app"</code></pre></li>
+  </ul>
+  <p class="muted">More detail in the <a href="/docs/install/">install docs</a>.</p>
+</dialog>
+
+<section class="shot">
+  <img src="/assets/session-management.gif" alt="Managing sessions in Boring Terminal" loading="lazy">
+</section>
+
+<section class="features">
+  <h2>Features</h2>
+  <dl>
+    <dt>Persistent sessions</dt>
+    <dd>Closing the window does not end a long-running agent, shell, or build.
+    Open the app again and the session is where you left it.</dd>
+    <dt>Attention routing</dt>
+    <dd>Sessions that need you are marked in the sidebar, driven by standard
+    escape sequences, so it works with any agent.</dd>
+    <dt>Session sidebar</dt>
+    <dd>Every open session in one vertical list. No tabs to lose, no panes to
+    manage.</dd>
+    <dt>Split sessions</dt>
+    <dd>Two related sessions side by side. One pair, nothing to configure.</dd>
+    <dt>Terminal graphics</dt>
+    <dd>Images and video rendered inline alongside text, via the Kitty
+    graphics protocol.</dd>
+    <dt>Mac-native, Metal-only</dt>
+    <dd>Real IME input, dead keys, emoji, drag-and-drop paths. GPU-rendered
+    with Metal. No portability layer.</dd>
+  </dl>
+</section>
+
+<section class="creed">
+  <h2>Why boring</h2>
+  <p>Built in the agent era, not only for it. Whether you're running ten
+  agents or one shell, the terminal's job is the same: stay out of the way
+  and tell you when something needs you. Every feature either passes one
+  test or stays out: <em>“does it help someone run ten agents and know which
+  one needs them?”</em>
+  <a href="/docs/philosophy/">Read the philosophy</a>.</p>
+</section>
+
+</main>

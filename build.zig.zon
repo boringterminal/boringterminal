@@ -1,0 +1,21 @@
+.{
+    .name = .boringterminal,
+    .version = "0.4.0",
+    .fingerprint = 0x6b1698784a2ac312, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zg = .{
+            .url = "https://codeberg.org/atman/zg/archive/v0.16.2.tar.gz",
+            .hash = "zg-0.16.2-oGqU3HqftgI6rwFS90ypwfjgToH8Pz829OKuFURlm773",
+        },
+    },
+    .paths = .{
+        "AGENTS.md",
+        "assets",
+        "build.zig",
+        "build.zig.zon",
+        "docs",
+        "src",
+        "tests",
+    },
+}

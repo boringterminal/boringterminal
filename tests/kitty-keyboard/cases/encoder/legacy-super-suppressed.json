@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "encoder.legacy.super-suppressed",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "rfc-policy",
+    "source": "Unclaimed Command events require explicit report-all negotiation",
+    "rfc": "RFC 0005: Correlated native input amendment"
+  },
+  "steps": [{ "event": {
+    "code": "codepoint",
+    "codepoint": 97,
+    "modifiers": { "super": true }
+  } }],
+  "expect": { "suppressed": true }
+}

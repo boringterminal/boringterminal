@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- "K": chrome frame, machined groove, recessed CRT screen with faint
+       scanlines; the character is two closed-eye dashes at optical center,
+       sliced through a fine stripe mask and lit cool white. No mouth: the
+       dashes also read as the shell's end-of-options separator. -->
+  <defs>
+    <linearGradient id="chrome" x1="164" y1="96" x2="856" y2="936" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4f7fb"/>
+      <stop offset="0.18" stop-color="#d0d6de"/>
+      <stop offset="0.48" stop-color="#89919c"/>
+      <stop offset="0.76" stop-color="#555d68"/>
+      <stop offset="1" stop-color="#aeb5be"/>
+    </linearGradient>
+    <linearGradient id="groove" x1="0" y1="98" x2="0" y2="926" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#040507"/>
+      <stop offset="0.75" stop-color="#101318"/>
+      <stop offset="1" stop-color="#22262d"/>
+    </linearGradient>
+    <linearGradient id="lip" x1="0" y1="98" x2="0" y2="926" gradientUnits="userSpaceOnUse">
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="118" x2="0" y2="906" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#171b22"/>
+      <stop offset="0.55" stop-color="#10141a"/>
+      <stop offset="1" stop-color="#0a0d11"/>
+    </linearGradient>
+    <linearGradient id="topshade" x1="0" y1="118" x2="0" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="380" x2="0" y2="668" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f2f7fc"/>
+      <stop offset="1" stop-color="#aebfd0"/>
+    </linearGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.46" r="0.72">
+      <stop offset="0.62" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.3"/>
+    </radialGradient>
+    <radialGradient id="bloom" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#dceafa" stop-opacity="0.09"/>
+      <stop offset="1" stop-color="#dceafa" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="hot" cx="0.5" cy="0.46" r="0.52">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#000000"/>
+    </radialGradient>
+    <mask id="hotmask">
+      <rect x="118" y="118" width="788" height="788" fill="url(#hot)"/>
+    </mask>
+    <pattern id="lines" width="1024" height="11" patternUnits="userSpaceOnUse">
+      <rect width="1024" height="3" y="4" fill="#cfe0f0"/>
+    </pattern>
+    <pattern id="stripes" width="1024" height="10" patternUnits="userSpaceOnUse">
+      <rect width="1024" height="7" fill="#ffffff"/>
+    </pattern>
+    <!-- userSpaceOnUse regions: the default bbox-relative mask/filter regions
+         collapse to nothing for a single-row glyph whose geometry bbox has
+         zero height. -->
+    <mask id="stripemask" maskUnits="userSpaceOnUse" x="64" y="64" width="896" height="896">
+      <rect x="118" y="118" width="788" height="788" fill="url(#stripes)"/>
+    </mask>
+    <clipPath id="screenclip">
+      <rect x="118" y="118" width="788" height="788" rx="154"/>
+    </clipPath>
+    <filter id="glowblur" filterUnits="userSpaceOnUse" x="64" y="64" width="896" height="896">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+
+  <!-- Match the macOS app-icon safe-zone footprint used by neighboring
+       applications while preserving the composition itself. -->
+  <g transform="translate(512 512) scale(0.9732142857) translate(-512 -512)">
+    <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#chrome)"/>
+    <rect x="69" y="69" width="886" height="886" rx="203" fill="none" stroke="#ffffff" stroke-opacity="0.58" stroke-width="6"/>
+
+    <rect x="98" y="98" width="828" height="828" rx="174" fill="url(#groove)"/>
+    <rect x="99.5" y="99.5" width="825" height="825" rx="172.5" fill="none" stroke="url(#lip)" stroke-width="3"/>
+
+    <rect x="118" y="118" width="788" height="788" rx="154" fill="url(#screen)"/>
+
+    <g clip-path="url(#screenclip)">
+      <rect x="118" y="118" width="788" height="788" fill="url(#lines)" opacity="0.04"/>
+      <rect x="118" y="118" width="788" height="788" fill="url(#lines)" opacity="0.04" mask="url(#hotmask)"/>
+      <path d="M240 502h160M624 502h160" fill="none" stroke="url(#face)" stroke-width="64" stroke-linecap="round" filter="url(#glowblur)" opacity="0.3"/>
+      <path d="M240 502h160M624 502h160" fill="none" stroke="url(#face)" stroke-width="60" stroke-linecap="round" mask="url(#stripemask)"/>
+      <rect x="118" y="118" width="788" height="122" fill="url(#topshade)"/>
+      <rect x="118" y="118" width="788" height="788" fill="url(#vig)"/>
+    </g>
+  </g>
+</svg>

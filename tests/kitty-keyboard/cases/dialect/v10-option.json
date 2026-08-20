@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "dialect.v10.option-composed-raw",
+  "layer": "dialect",
+  "provenance": {
+    "kind": "rfc-policy",
+    "source": "Honest retained-dialect downgrade for Option-composed text",
+    "rfc": "RFC 0019: First retained migrations v10/v13 daemons to v15 viewer"
+  },
+  "dialect": 10,
+  "steps": [{ "event": {
+    "code": "codepoint",
+    "codepoint": 97,
+    "modifiers": { "alt": true },
+    "text_hex": "c3a5"
+  } }],
+  "expect": {
+    "dispatches": ["write"],
+    "request_payload_hexes": ["2a0000000000000002000000c3a5"],
+    "pty_hex": "c3a5"
+  }
+}

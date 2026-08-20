@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "matrix.legacy-control-ascii",
+  "layer": "matrix",
+  "matrix": "legacy_control_ascii",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Legacy ctrl mapping of ASCII keys"]
+  }
+}

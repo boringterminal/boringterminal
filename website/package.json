@@ -1,0 +1,12 @@
+{
+  "name": "boringterminal-website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "node build.mjs && npx -y serve dist"
+  },
+  "dependencies": {
+    "marked": "^15.0.0"
+  }
+}

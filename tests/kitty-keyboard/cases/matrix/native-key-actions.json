@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "matrix.native-key-actions",
+  "layer": "matrix",
+  "matrix": "native_key_actions",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published protocol key table bounded by RFC 0013's ordinary AppKit inventory",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Event types", "Functional key definitions"],
+    "rfc": "RFC 0013: Kitty keyboard phase 2 amendment"
+  }
+}

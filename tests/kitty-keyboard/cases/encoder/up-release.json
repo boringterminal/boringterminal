@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "encoder.events.up-release",
+  "layer": "encoder",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Event types", "Functional key encoding"]
+  },
+  "initial": { "flags": 3 },
+  "steps": [{ "event": { "code": "up", "action": "release" } }],
+  "expect": { "pty_hex": "1b5b313b313a3341" }
+}

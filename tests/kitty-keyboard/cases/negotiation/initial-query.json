@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "negotiation.initial-query",
+  "layer": "negotiation",
+  "provenance": {
+    "kind": "spec",
+    "source": "Published Kitty keyboard protocol",
+    "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
+    "spec_retrieved": "2026-08-19",
+    "spec_sections": ["Progressive enhancement"]
+  },
+  "steps": [{ "feed_hex": "1b5b3f75" }],
+  "split_every_byte": true,
+  "expect": { "flags": 0, "pty_hex": "1b5b3f3075" }
+}
