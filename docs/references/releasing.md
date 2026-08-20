@@ -48,7 +48,8 @@ suite with exact font and glyph-containing Metal hashes.
 
 `.github/workflows/release.yml` validates the tag and versions, repeats the
 tests, runs the same packager, and creates or updates the GitHub release using
-the repository-scoped `GITHUB_TOKEN`. No signing secrets are required.
+the repository-scoped `GITHUB_TOKEN`. New releases prepend the Gatekeeper
+notice below to their generated notes. No signing secrets are required.
 
 ## Gatekeeper
 

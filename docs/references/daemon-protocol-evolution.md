@@ -130,7 +130,7 @@ The current retained-dialect record is:
 
 | Role | Dialect | Public releases |
 | --- | ---: | --- |
-| current | 18 | next release (development v14/v15/v16/v17 were never public) |
+| current | 18 | v0.5.0 (development v14/v15/v16/v17 were never public) |
 | retained | 13 | v0.4.0 |
 | retained | 10 | v0.2.0, v0.3.0 |
 

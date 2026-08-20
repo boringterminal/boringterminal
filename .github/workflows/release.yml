@@ -55,8 +55,10 @@ jobs:
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
           else
+            release_notice=$'> [!IMPORTANT]\n> This build is ad-hoc signed and not notarized. macOS may require **Open Anyway** on first launch. See the [installation instructions](https://boringterminal.com/docs/install/).'
             gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
               --verify-tag \
               --generate-notes \
+              --notes "${release_notice}" \
               --title "Boring Terminal ${GITHUB_REF_NAME#v}"
           fi

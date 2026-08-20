@@ -71,7 +71,7 @@ the omitted and explicit-zero forms, `CSI > q` and `CSI > 0 q`, and reply in
 xterm's 7-bit form:
 
 ```text
-DCS >|boringterminal 0.4.0 ST
+DCS >|boringterminal 0.5.0 ST
 ```
 
 The semantic version comes from the same compile-time product constant used

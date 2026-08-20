@@ -184,7 +184,7 @@ test "lifecycle status codec is bounded and exact" {
     const alloc = std.testing.allocator;
     const dialects = [_]u16{ 14, 13, 12 };
     const encoded = try encodeStatus(alloc, .{
-        .product_version = "0.4.0",
+        .product_version = "0.5.0",
         .dialects = &dialects,
         .session_count = 7,
         .attach_connection_count = 3,
@@ -192,7 +192,7 @@ test "lifecycle status codec is bounded and exact" {
     });
     defer alloc.free(encoded);
     const decoded = try decodeStatus(encoded);
-    try std.testing.expectEqualStrings("0.4.0", decoded.product_version);
+    try std.testing.expectEqualStrings("0.5.0", decoded.product_version);
     try std.testing.expectEqual(@as(usize, 3), decoded.supportedDialects().len);
     try std.testing.expectEqual(@as(u16, 14), decoded.supportedDialects()[0]);
     try std.testing.expectEqual(@as(u16, 12), decoded.supportedDialects()[2]);

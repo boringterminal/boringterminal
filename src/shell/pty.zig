@@ -420,7 +420,7 @@ test "pty end to end: spawn, env, read, reap" {
         try out.appendSlice(alloc, buf[0..n]);
     }
     pty.wait();
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "ok:xterm-256color:boringterminal:0.4.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "ok:xterm-256color:boringterminal:0.5.0") != null);
 }
 
 test "pty feeds terminal" {

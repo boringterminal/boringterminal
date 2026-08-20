@@ -47,7 +47,7 @@ VPA (d) · CHT/CBT (I Z) · HPA (`)
   deliberately fixed modes report permanent state, and one-shot/unknown modes
   report unrecognized
 ☑ XTVERSION (`CSI > q` / `CSI > 0 q` →
-  `DCS > | boringterminal 0.4.0 ST`)
+  `DCS > | boringterminal 0.5.0 ST`)
 
 ## SGR (CSI m)
 

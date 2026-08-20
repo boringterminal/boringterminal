@@ -1041,8 +1041,8 @@ test "xtversion reports product identity for omitted and zero requests" {
     v.feed("\x1b[>q\x1b[>0q\x1b[>1q\x1b[>0;1q\x1b[0q");
     const actions = v.term.drainActions();
     try t.expectEqual(@as(usize, 2), actions.len);
-    try t.expectEqualStrings("\x1bP>|boringterminal 0.4.0\x1b\\", actions[0].pty_write);
-    try t.expectEqualStrings("\x1bP>|boringterminal 0.4.0\x1b\\", actions[1].pty_write);
+    try t.expectEqualStrings("\x1bP>|boringterminal 0.5.0\x1b\\", actions[0].pty_write);
+    try t.expectEqualStrings("\x1bP>|boringterminal 0.5.0\x1b\\", actions[1].pty_write);
     v.term.clearActions();
 }
 
@@ -1054,7 +1054,7 @@ test "xtversion query is chunk-split safe" {
     for ("\x1b[>0q") |byte| v.feed(&[_]u8{byte});
     const actions = v.term.drainActions();
     try t.expectEqual(@as(usize, 1), actions.len);
-    try t.expectEqualStrings("\x1bP>|boringterminal 0.4.0\x1b\\", actions[0].pty_write);
+    try t.expectEqualStrings("\x1bP>|boringterminal 0.5.0\x1b\\", actions[0].pty_write);
     v.term.clearActions();
 }
 
