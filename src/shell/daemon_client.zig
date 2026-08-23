@@ -1996,13 +1996,16 @@ const V13Fixture = struct {
         defer server.deinit(self.io);
         self.ready.store(true, .release);
 
-        // Pre-BTL1 peer rejects lifecycle, then the disposable current probe.
+        // Pre-BTL1 peer rejects lifecycle, then newer exact probes.
         var rejected_lifecycle = try server.accept(self.io);
         rejected_lifecycle.close(self.io);
         var rejected_current = try server.accept(self.io);
         rejected_current.close(self.io);
 
-        // The third connection is the selected v13 command lane.
+        var rejected_v18 = try server.accept(self.io);
+        rejected_v18.close(self.io);
+
+        // The fourth connection is the selected v13 command lane.
         var command = try server.accept(self.io);
         defer command.close(self.io);
         try expectFrozenFrame(
@@ -2062,92 +2065,6 @@ const V13Fixture = struct {
     }
 };
 
-const V10Fixture = struct {
-    io: std.Io,
-    path: []const u8,
-    ready: std.atomic.Value(bool) = .init(false),
-    failure: ?anyerror = null,
-
-    fn run(self: *V10Fixture) void {
-        self.runFallible() catch |err| {
-            self.failure = err;
-        };
-        self.ready.store(true, .release);
-    }
-
-    fn runFallible(self: *V10Fixture) !void {
-        const alloc = std.heap.page_allocator;
-        const address = try std.Io.net.UnixAddress.init(self.path);
-        var server = try address.listen(self.io, .{});
-        defer server.deinit(self.io);
-        self.ready.store(true, .release);
-
-        var rejected_lifecycle = try server.accept(self.io);
-        rejected_lifecycle.close(self.io);
-        var rejected_current = try server.accept(self.io);
-        rejected_current.close(self.io);
-        var rejected_v13 = try server.accept(self.io);
-        rejected_v13.close(self.io);
-
-        var command = try server.accept(self.io);
-        defer command.close(self.io);
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/list-request.hex"),
-        );
-        try sendFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/empty-registry-response.hex"),
-        );
-
-        var rejected_lifecycle_retry = try server.accept(self.io);
-        rejected_lifecycle_retry.close(self.io);
-        var refresh = try server.accept(self.io);
-        defer refresh.close(self.io);
-
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/list-request.hex"),
-        );
-        try sendFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/empty-registry-response.hex"),
-        );
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/snapshot-request.hex"),
-        );
-        try sendFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/minimal-snapshot-response.hex"),
-        );
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/up-key-request.hex"),
-        );
-        try protocol.writeFrameVersion(command.socket.handle, 10, .ok, &.{});
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/committed-text-request.hex"),
-        );
-        try protocol.writeFrameVersion(command.socket.handle, 10, .ok, &.{});
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v10/mouse-request.hex"),
-        );
-        try protocol.writeFrameVersion(command.socket.handle, 10, .bool_result, &.{1});
-    }
-};
-
 const UnsupportedLegacyFixture = struct {
     io: std.Io,
     path: []const u8,
@@ -2166,7 +2083,7 @@ const UnsupportedLegacyFixture = struct {
         var server = try address.listen(self.io, .{});
         defer server.deinit(self.io);
         self.ready.store(true, .release);
-        // Malformed lifecycle, current, v13, and v10 probes are all rejected.
+        // Malformed lifecycle, current, v18, and v13 probes are rejected.
         // Only after every retained dialect fails may startup classify the
         // peer as upgrade-required.
         inline for (0..4) |_| {
@@ -2239,6 +2156,64 @@ fn sendFrozenFrame(fd: c.fd_t, alloc: std.mem.Allocator, source: []const u8) !vo
     try sendExactFixture(fd, frame);
 }
 
+test "v18 frozen snapshots translate every released pointer value" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { []const u8, vt.mouse.PointerShape }{
+        .{ @embedFile("daemon_protocol/fixtures/v18/minimal-snapshot-text-response.hex"), .text },
+        .{ @embedFile("daemon_protocol/fixtures/v18/minimal-snapshot-default-response.hex"), .default },
+        .{ @embedFile("daemon_protocol/fixtures/v18/minimal-snapshot-pointer-response.hex"), .pointer },
+        .{ @embedFile("daemon_protocol/fixtures/v18/minimal-snapshot-crosshair-response.hex"), .crosshair },
+    };
+    for (cases) |case| {
+        const frame = try frozenHex(alloc, case[0]);
+        defer alloc.free(frame);
+        try std.testing.expectEqualStrings("BTD1", frame[0..4]);
+        try std.testing.expectEqual(@as(u16, 18), std.mem.readInt(u16, frame[4..6], .little));
+        try std.testing.expectEqual(
+            @intFromEnum(protocol.Tag.snapshot_result),
+            std.mem.readInt(u16, frame[6..8], .little),
+        );
+        try std.testing.expectEqual(
+            @as(usize, std.mem.readInt(u32, frame[8..12], .little)),
+            frame.len - 12,
+        );
+        var dec: protocol.Decoder = .{ .bytes = frame[12..] };
+        var snapshot = try selected_protocol.decodeSnapshot(.v18, &dec, alloc);
+        defer snapshot.deinit(alloc);
+        try dec.finish();
+        try std.testing.expectEqual(case[1], snapshot.pointer_shape);
+        try std.testing.expectEqualStrings("v18", snapshot.title);
+    }
+
+    const text_frame = try frozenHex(
+        alloc,
+        @embedFile("daemon_protocol/fixtures/v18/minimal-snapshot-text-response.hex"),
+    );
+    defer alloc.free(text_frame);
+    var current_dec: protocol.Decoder = .{ .bytes = text_frame[12..] };
+    try std.testing.expectError(
+        error.InvalidBoolean,
+        selected_protocol.decodeSnapshot(.current, &current_dec, alloc),
+    );
+
+    var v13_text_dec: protocol.Decoder = .{ .bytes = text_frame[12..] };
+    var v13_snapshot = try selected_protocol.decodeSnapshot(.v13, &v13_text_dec, alloc);
+    defer v13_snapshot.deinit(alloc);
+    try v13_text_dec.finish();
+    try std.testing.expectEqual(vt.mouse.PointerShape.text, v13_snapshot.pointer_shape);
+
+    const pointer_frame = try frozenHex(
+        alloc,
+        @embedFile("daemon_protocol/fixtures/v18/minimal-snapshot-pointer-response.hex"),
+    );
+    defer alloc.free(pointer_frame);
+    var v13_dec: protocol.Decoder = .{ .bytes = pointer_frame[12..] };
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        selected_protocol.decodeSnapshot(.v13, &v13_dec, alloc),
+    );
+}
+
 test "resize mailbox retains only the newest unpublished geometry" {
     var slot: ?ResizeRequest = null;
     coalesceResize(&slot, .{
@@ -2289,66 +2264,6 @@ test "peer verification rejects a same-uid non-daemon executable" {
         error.UnverifiedDaemonPeer,
         verifiedDaemonPeerPid(client_stream.socket.handle),
     );
-}
-
-test "client negotiates v10 and translates its frozen snapshot" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var random_bytes: [8]u8 = undefined;
-    io.random(&random_bytes);
-    var home_buf: [64]u8 = undefined;
-    const home = try std.fmt.bufPrint(
-        &home_buf,
-        "/tmp/bt-v10-{x}",
-        .{std.mem.readInt(u64, &random_bytes, .little)},
-    );
-    try std.Io.Dir.createDirAbsolute(io, home, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
-    var env = try std.process.Environ.createMap(std.testing.environ, alloc);
-    defer env.deinit();
-    try env.put("HOME", home);
-    const support_dir = try protocol.supportDir(alloc, &env);
-    defer alloc.free(support_dir);
-    try std.Io.Dir.cwd().createDirPath(io, support_dir);
-    const socket_path = try protocol.socketPath(alloc, &env);
-    defer alloc.free(socket_path);
-
-    var fixture: V10Fixture = .{ .io = io, .path = socket_path };
-    const thread = try std.Thread.spawn(.{}, V10Fixture.run, .{&fixture});
-    while (!fixture.ready.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
-    if (fixture.failure) |err| return err;
-
-    var client = try Client.init(alloc, io, &env);
-    try std.testing.expectEqual(@as(u16, 10), client.attachDialect());
-    try std.testing.expect(client.updatePending());
-    try std.testing.expect(!client.supportsSearch());
-    try std.testing.expect(!client.supportsCreateBeside());
-    try std.testing.expect(!client.supportsPersistentPairZoom());
-    var registry = try client.listRegistry();
-    defer registry.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), registry.sessions.len);
-    try std.testing.expectError(error.FeatureUnavailable, client.search(1, .initial, "x", null));
-    try std.testing.expectError(error.FeatureUnavailable, client.createBeside(1, 40, 24, null));
-    try std.testing.expectError(error.FeatureUnavailable, client.setPairZoom(1, true));
-    var snapshot = try client.snapshot(1);
-    defer snapshot.deinit(alloc);
-    try std.testing.expectEqualStrings("v10", snapshot.title);
-    try std.testing.expectEqual(@as(u64, 0), snapshot.grid_epoch);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.hyperlinks.len);
-    try std.testing.expectEqual(@as(u32, 0), snapshot.cells[0].hyperlink_id);
-    try client.keyEvent(1, .{ .code = .up });
-    try client.keyEvent(1, .{ .code = .text, .text = "hello" });
-    try std.testing.expect(try client.mouseEvent(1, .{
-        .kind = .press,
-        .button = .left,
-        .col = 4,
-        .row = 2,
-        .pixel_x = 80,
-        .pixel_y = 40,
-    }));
-    client.deinit();
-    thread.join();
-    if (fixture.failure) |err| return err;
 }
 
 test "malformed peer exhausts exact dialects into typed upgrade result" {

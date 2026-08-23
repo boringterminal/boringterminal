@@ -52,7 +52,7 @@ Unix-domain `SOCK_STREAM` socket. Every frame begins with:
 
 ```
 u32 magic       // "BTD1"
-u16 version     // 18
+u16 version     // 19
 u16 message tag
 u32 payload length
 ```
@@ -89,7 +89,10 @@ event lanes; each lane retains that dialect for its lifetime. RFC 0019 requires
 the version-15 viewer to retain v13 and v10 client adapters for the first
 pre-negotiation migrations. The v10 capsule translates its older snapshot
 shape and reports search/create-beside unavailable; strict frame validation
-remains unchanged after dialect selection.
+remains unchanged after dialect selection. Dialect 19 separates OSC 22 pointer
+shape from the snapshot-mode bitfield: the mode byte's high two bits return to
+reserved zero and a following validated byte carries the six RFC 0024 shapes.
+The viewer retains an exact v18 snapshot adapter.
 
 The command surface required by the viewer is intentionally mechanical:
 
@@ -498,6 +501,21 @@ unreleased development dialect and consumes no public compatibility slot.
 Public v13/v10 snapshots already encode zero in those bits, so their retained
 viewer path truthfully exposes the text default without a legacy terminal
 codec or fabricated application state.
+
+## Version 19 complete OSC 22 pointer-shape amendment (2026-08-22)
+
+Version 19 restores the snapshot mode byte's high two bits to reserved zero
+and inserts one validated pointer-shape byte immediately after it. Values
+0 through 33 encode RFC 0024's complete canonical vocabulary; larger values
+and nonzero reserved mode bits reject the snapshot. Modes and pointer shape
+are separate in the canonical in-memory snapshot.
+
+Version 18 shipped publicly in v0.5.0. The current viewer therefore decodes its
+exact four-state, high-bit layout through a frozen viewer-only capsule. Public
+v13 uses the same prefix with those bits reserved zero and is decoded strictly
+as text. The current daemon links only the version 19 codec. RFC 0019 owns the
+release-boundary rotation; v10 remains during development and leaves the window
+only if version 19 ships publicly.
 
 ## Failure behavior
 

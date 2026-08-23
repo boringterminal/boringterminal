@@ -72,11 +72,11 @@ src/daemon/
 src/shell/daemon_protocol/
   selected.zig              # the only current/retained dispatch point
   compat/
-    v13.zig                 # one exact retained public dialect
-    v10.zig                 # second retained public dialect
+    v18.zig                 # first retained public dialect
+    v13.zig                 # second retained public dialect
 src/shell/daemon_protocol/fixtures/
+  v18/                      # frozen v0.5.0 frames
   v13/                      # embedded frozen frames for the skew fixture
-  v10/
 ```
 
 The exact filenames may follow the implementation's natural Zig package
@@ -89,7 +89,7 @@ compat capsule -> current canonical value types
 ```
 
 Stable code sees a small selected-dialect value and capability result. It does
-not import `v13`/`v10`, switch on numeric versions, or know downgrade details. The
+not import `v18`/`v13`, switch on numeric versions, or know downgrade details. The
 single dispatch module may switch between `current` and retained capsules;
 nowhere else may do so. The daemon build must not link compatibility capsules.
 
@@ -130,9 +130,12 @@ The current retained-dialect record is:
 
 | Role | Dialect | Public releases |
 | --- | ---: | --- |
-| current | 18 | v0.5.0 (development v14/v15/v16/v17 were never public) |
+| current | 19 | v0.6.0 |
+| retained | 18 | v0.5.0 |
 | retained | 13 | v0.4.0 |
-| retained | 10 | v0.2.0, v0.3.0 |
+
+The v0.6.0 release rotation removed the v10 capsule and frozen fixtures after
+adding the exact v18 snapshot adapter derived from the v0.5.0 tag.
 
 ## Feature availability
 

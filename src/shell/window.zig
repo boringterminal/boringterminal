@@ -4955,6 +4955,23 @@ fn setNativePointerShape(shape: vt.mouse.PointerShape) void {
         .default => "arrowCursor",
         .pointer => "pointingHandCursor",
         .crosshair => "crosshairCursor",
+        .context_menu => "contextualMenuCursor",
+        .help, .progress, .wait => "arrowCursor",
+        .cell => "crosshairCursor",
+        .vertical_text => "IBeamCursorForVerticalLayout",
+        .alias => "dragLinkCursor",
+        .copy => "dragCopyCursor",
+        .move, .grab, .all_scroll => "openHandCursor",
+        .grabbing => "closedHandCursor",
+        .no_drop, .not_allowed => "operationNotAllowedCursor",
+        .col_resize, .ew_resize => "resizeLeftRightCursor",
+        .row_resize, .ns_resize => "resizeUpDownCursor",
+        .n_resize => "resizeUpCursor",
+        .e_resize => "resizeRightCursor",
+        .s_resize => "resizeDownCursor",
+        .w_resize => "resizeLeftCursor",
+        .ne_resize, .nw_resize, .se_resize, .sw_resize, .nesw_resize, .nwse_resize => "crosshairCursor",
+        .zoom_in, .zoom_out => "pointingHandCursor",
     };
     const cursor = objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) objc.Id)(
         objc.cls("NSCursor"),
@@ -4979,7 +4996,7 @@ fn applyTrackedPointerShape() void {
     };
     session.mutex.lockUncancelable(session.io);
     const shape = if (session.render_snapshot) |snapshot|
-        snapshot.modes.pointer_shape
+        snapshot.pointer_shape
     else
         vt.mouse.PointerShape.text;
     session.mutex.unlock(session.io);

@@ -224,7 +224,8 @@ fn validateCase(case: Case) !void {
         .dialect, .pty => {
             if (case.matrix != null) return error.InvalidLayerShape;
             const dialect = case.dialect orelse return error.InvalidLayerShape;
-            if (dialect != 18 and dialect != 13 and dialect != 10) return error.UnsupportedDialect;
+            if (dialect != 19 and dialect != 18 and dialect != 13 and dialect != 10)
+                return error.UnsupportedDialect;
             if (case.steps.len == 0 or case.expect.flags != null or
                 case.expect.suppressed or case.expect.pty_hex == null or
                 case.expect.dispatches.len != case.steps.len or
@@ -365,9 +366,9 @@ fn runEncoder(alloc: std.mem.Allocator, case: Case) !void {
 
 fn runDialect(alloc: std.mem.Allocator, case: Case, real_pty: bool) !void {
     const dialect: selected.Dialect = switch (case.dialect.?) {
-        18 => if (protocol.version == 18) .current else return error.CurrentDialectChanged,
+        19 => if (protocol.version == 19) .current else return error.CurrentDialectChanged,
+        18 => .v18,
         13 => .v13,
-        10 => .v10,
         else => unreachable,
     };
     const session_id: u64 = 42;

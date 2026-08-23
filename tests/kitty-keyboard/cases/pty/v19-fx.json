@@ -1,25 +1,25 @@
 {
   "schema": 1,
-  "id": "dialect.v10.fx-committed-text-raw",
-  "layer": "dialect",
+  "id": "pty.v19.fx-semantic",
+  "layer": "pty",
   "provenance": {
     "kind": "regression",
-    "source": "Boring Terminal fx committed-text regression",
+    "source": "Boring Terminal current semantic-key PTY path regression",
     "spec_url": "https://sw.kovidgoyal.net/kitty/keyboard-protocol/",
     "spec_retrieved": "2026-08-19",
     "spec_sections": ["An overview", "Legacy key event encoding"],
-    "regression": "v10 cannot carry correlated text and must use bounded raw input"
+    "regression": "current semantic f/x events must remain byte-transparent through a PTY"
   },
-  "dialect": 10,
+  "dialect": 19,
   "steps": [
     { "event": { "code": "codepoint", "codepoint": 102, "text_hex": "66" } },
     { "event": { "code": "codepoint", "codepoint": 120, "text_hex": "78" } }
   ],
   "expect": {
-    "dispatches": ["write", "write"],
+    "dispatches": ["key", "key"],
     "request_payload_hexes": [
-      "2a000000000000000100000066",
-      "2a000000000000000100000078"
+      "2a000000000000000100006600000000000000000000000100000066",
+      "2a000000000000000100007800000000000000000000000100000078"
     ],
     "pty_hex": "6678"
   }

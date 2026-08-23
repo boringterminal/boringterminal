@@ -24,6 +24,7 @@ test {
     _ = @import("daemon/integration_tests.zig");
     _ = @import("shell/daemon_client.zig");
     _ = @import("shell/daemon_protocol/compat/metadata_v10_v13.zig");
+    _ = @import("shell/daemon_protocol/compat/v18.zig");
     _ = @import("render/box_drawing.zig");
     _ = @import("render/font.zig");
     _ = @import("render/atlas.zig");

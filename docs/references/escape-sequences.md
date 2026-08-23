@@ -47,7 +47,7 @@ VPA (d) · CHT/CBT (I Z) · HPA (`)
   deliberately fixed modes report permanent state, and one-shot/unknown modes
   report unrecognized
 ☑ XTVERSION (`CSI > q` / `CSI > 0 q` →
-  `DCS > | boringterminal 0.5.0 ST`)
+  `DCS > | boringterminal 0.6.0 ST`)
 
 ## SGR (CSI m)
 
@@ -89,9 +89,9 @@ pending-wrap) · 25 DECTCEM (12 blink consumed)
   feeds session metadata and new-session inheritance; RFC 0020)
 ☑ 8 semantic hyperlinks (printable bounded URI + `id=` identity; retained
   with cells; Command-hover/Command-click in the native viewer; RFC 0018)
-◐ 22 pointer shape (daemon-retained `text`/`default`/`pointer`/`crosshair`
-  plus xterm aliases; empty/unknown reset to text; full CSS cursor-name set is
-  a future explicit dialect, RFC 0002)
+☑ 22 pointer shape (all 34 canonical CSS names plus documented xterm/Xcursor
+  aliases; daemon-retained native mapping, empty/unknown reset to text,
+  hyperlink precedence, and v18 compatibility per RFC 0024)
 ☑ 9 notification (iTerm2 style; `9;4;...` progress is not notification) ·
 ☑ 777 notify (urxvt/foot style;
   `777;notify;title;body`)

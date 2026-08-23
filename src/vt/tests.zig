@@ -1041,8 +1041,8 @@ test "xtversion reports product identity for omitted and zero requests" {
     v.feed("\x1b[>q\x1b[>0q\x1b[>1q\x1b[>0;1q\x1b[0q");
     const actions = v.term.drainActions();
     try t.expectEqual(@as(usize, 2), actions.len);
-    try t.expectEqualStrings("\x1bP>|boringterminal 0.5.0\x1b\\", actions[0].pty_write);
-    try t.expectEqualStrings("\x1bP>|boringterminal 0.5.0\x1b\\", actions[1].pty_write);
+    try t.expectEqualStrings("\x1bP>|boringterminal 0.6.0\x1b\\", actions[0].pty_write);
+    try t.expectEqualStrings("\x1bP>|boringterminal 0.6.0\x1b\\", actions[1].pty_write);
     v.term.clearActions();
 }
 
@@ -1054,7 +1054,7 @@ test "xtversion query is chunk-split safe" {
     for ("\x1b[>0q") |byte| v.feed(&[_]u8{byte});
     const actions = v.term.drainActions();
     try t.expectEqual(@as(usize, 1), actions.len);
-    try t.expectEqualStrings("\x1bP>|boringterminal 0.5.0\x1b\\", actions[0].pty_write);
+    try t.expectEqualStrings("\x1bP>|boringterminal 0.6.0\x1b\\", actions[0].pty_write);
     v.term.clearActions();
 }
 
@@ -1486,7 +1486,7 @@ test "osc dynamic color queries are chunk-split safe and sets are ignored" {
     v.term.clearActions();
 }
 
-test "osc 22 stores bounded pointer shapes and resets unknown names" {
+test "osc 22 stores complete pointer shapes and resets unknown names" {
     var v = try vt.Vt.init(t.allocator, 20, 4);
     defer v.deinit();
 
@@ -1501,6 +1501,10 @@ test "osc 22 stores bounded pointer shapes and resets unknown names" {
     v.feed("\x1b]22;cross\x1b\\");
     try t.expectEqual(vt.mouse.PointerShape.crosshair, v.term.pointer_shape);
     v.feed("\x1b]22;row-resize\x1b\\");
+    try t.expectEqual(vt.mouse.PointerShape.row_resize, v.term.pointer_shape);
+    v.feed("\x1b]22;grabbing\x1b\\");
+    try t.expectEqual(vt.mouse.PointerShape.grabbing, v.term.pointer_shape);
+    v.feed("\x1b]22;bogus\x1b\\");
     try t.expectEqual(vt.mouse.PointerShape.text, v.term.pointer_shape);
     v.feed("\x1b]22;default\x1b\\");
     try t.expectEqual(vt.mouse.PointerShape.default, v.term.pointer_shape);
@@ -1511,8 +1515,8 @@ test "osc 22 stores bounded pointer shapes and resets unknown names" {
 test "osc 22 pointer shape is chunk-split safe" {
     var v = try vt.Vt.init(t.allocator, 20, 4);
     defer v.deinit();
-    for ("\x1b]22;pointer\x1b\\") |byte| v.feed(&.{byte});
-    try t.expectEqual(vt.mouse.PointerShape.pointer, v.term.pointer_shape);
+    for ("\x1b]22;nesw-resize\x1b\\") |byte| v.feed(&.{byte});
+    try t.expectEqual(vt.mouse.PointerShape.nesw_resize, v.term.pointer_shape);
 }
 
 test "osc 8 attaches semantic hyperlinks and closes with ST or BEL" {

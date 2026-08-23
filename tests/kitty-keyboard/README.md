@@ -19,12 +19,12 @@ unsupported dialect aliases. It exercises production APIs at five boundaries:
 
 - `negotiation`: bytes through `vt.feed()`, with exact flags/replies;
 - `encoder`: `vt.keyboard.encode()`, with exact child-visible bytes;
-- `dialect`: selected v18/v13/v10 request encoding plus child-visible
+- `dialect`: selected v19/v18/v13 request encoding plus child-visible
   semantic/raw behavior;
 - `matrix`: every flag combination, every modifier combination, every
   macOS-reachable physical/functional key and action, the legacy ASCII control
   table, and current-codec acceptance/rejection boundaries; and
-- `pty`: selected-dialect output through a real raw PTY for v18, v13, and v10.
+- `pty`: selected-dialect output through a real raw PTY for v19, v18, and v13.
 
 The 606-entry ratchet counts matrix members independently. Adding a native key
 code, protocol flag, action, modifier, or accepted codec shape without a stable

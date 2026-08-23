@@ -1,11 +1,9 @@
-dialect.v10.control-c-stays-semantic
-dialect.v10.fx-committed-text-raw
-dialect.v10.option-composed-raw
 dialect.v13.control-c-stays-semantic
 dialect.v13.fx-committed-text-raw
 dialect.v13.pure-ime-raw
 dialect.v13.shifted-printable-raw
 dialect.v18.fx-committed-text
+dialect.v19.fx-committed-text
 encoder.all-flags.shift-a-repeat-associated
 encoder.alternate.base-with-empty-shift
 encoder.associated.pure-text
@@ -601,6 +599,6 @@ negotiation.initial-query
 negotiation.replace-set-clear-push-pop
 negotiation.screen-isolation-ris-reset
 negotiation.stack-eviction
-pty.v10.fx-raw-mode
 pty.v13.fx-raw-mode
 pty.v18.fx-semantic
+pty.v19.fx-semantic

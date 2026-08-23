@@ -39,6 +39,7 @@ things are the way they are.
 | [0021](0021-website.md) | Website and documentation site | accepted |
 | [0022](0022-transient-graphics-materialization.md) | Transient graphics materialization | draft |
 | [0023](0023-frame-pipelined-graphics-uploads.md) | Frame-pipelined graphics uploads | accepted |
+| [0024](0024-osc22-pointer-shapes.md) | Complete OSC 22 pointer shapes | accepted |
 
 ## Conventions
 

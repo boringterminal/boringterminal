@@ -7,7 +7,7 @@ const graphics_limits = @import("../graphics_limits.zig");
 const display_registry = @import("display_registry.zig");
 const c = std.c;
 
-pub const version: u16 = 18;
+pub const version: u16 = 19;
 pub const max_payload: usize = 128 * 1024 * 1024;
 pub const max_working_directory_bytes: usize = 1024;
 const magic = "BTD1";
@@ -404,7 +404,26 @@ pub const SnapshotModes = packed struct(u8) {
     grapheme_cluster: bool = false,
     focus_reporting: bool = false,
     mouse_reporting: bool = false,
-    pointer_shape: vt.mouse.PointerShape = .text,
+    reserved: u2 = 0,
+};
+
+/// Canonical decoded snapshot prefix. Compatibility capsules decode their
+/// exact wire prefix into this value, then share the dialect-independent body
+/// validation below. No legacy layout is linked into the daemon.
+pub const SnapshotHeader = struct {
+    id: u64,
+    cols: u16,
+    rows: u16,
+    col: u16,
+    row: u16,
+    viewport_offset: u64,
+    sync_output_epoch: u64,
+    grid_epoch: u64,
+    modes: SnapshotModes,
+    pointer_shape: vt.mouse.PointerShape,
+    exited: bool,
+    working: bool,
+    attention: bool,
 };
 
 pub const ImageRef = struct {
@@ -587,6 +606,7 @@ pub const Snapshot = struct {
     sync_output_epoch: u64,
     grid_epoch: u64 = 0,
     modes: SnapshotModes,
+    pointer_shape: vt.mouse.PointerShape = .text,
     exited: bool,
     working: bool,
     attention: bool,
@@ -659,7 +679,9 @@ pub const Snapshot = struct {
         try enc.int(u64, self.viewport_offset);
         try enc.int(u64, self.sync_output_epoch);
         try enc.int(u64, self.grid_epoch);
+        if (self.modes.reserved != 0) return error.InvalidSnapshot;
         try enc.byte(@bitCast(self.modes));
+        try enc.byte(@intFromEnum(self.pointer_shape));
         try enc.boolean(self.exited);
         try enc.boolean(self.working);
         try enc.boolean(self.attention);
@@ -744,9 +766,43 @@ pub const Snapshot = struct {
         const sync_output_epoch = try dec.int(u64);
         const grid_epoch = try dec.int(u64);
         const modes: SnapshotModes = @bitCast(try dec.byte());
-        const exited = try dec.boolean();
-        const working = try dec.boolean();
-        const attention = try dec.boolean();
+        if (modes.reserved != 0) return error.InvalidSnapshot;
+        const pointer_shape = std.enums.fromInt(vt.mouse.PointerShape, try dec.byte()) orelse
+            return error.InvalidSnapshot;
+        return decodeBody(dec, alloc, .{
+            .id = id,
+            .cols = cols,
+            .rows = rows,
+            .col = col,
+            .row = row,
+            .viewport_offset = viewport_offset,
+            .sync_output_epoch = sync_output_epoch,
+            .grid_epoch = grid_epoch,
+            .modes = modes,
+            .pointer_shape = pointer_shape,
+            .exited = try dec.boolean(),
+            .working = try dec.boolean(),
+            .attention = try dec.boolean(),
+        });
+    }
+
+    pub fn decodeBody(
+        dec: *Decoder,
+        alloc: std.mem.Allocator,
+        header: SnapshotHeader,
+    ) !Snapshot {
+        const id = header.id;
+        const cols = header.cols;
+        const rows = header.rows;
+        const col = header.col;
+        const row = header.row;
+        const viewport_offset = header.viewport_offset;
+        const sync_output_epoch = header.sync_output_epoch;
+        const grid_epoch = header.grid_epoch;
+        const modes = header.modes;
+        const exited = header.exited;
+        const working = header.working;
+        const attention = header.attention;
         const title = try dec.allocBytes(alloc, 4096);
         errdefer alloc.free(title);
         const count = try dec.int(u32);
@@ -911,6 +967,7 @@ pub const Snapshot = struct {
             .sync_output_epoch = sync_output_epoch,
             .grid_epoch = grid_epoch,
             .modes = modes,
+            .pointer_shape = header.pointer_shape,
             .exited = exited,
             .working = working,
             .attention = attention,
@@ -1671,7 +1728,8 @@ test "snapshot codec preserves semantic cells and selection" {
         .row = 0,
         .viewport_offset = 17,
         .sync_output_epoch = 5,
-        .modes = .{ .pointer_shape = .pointer },
+        .modes = .{},
+        .pointer_shape = .grabbing,
         .exited = false,
         .working = true,
         .attention = false,
@@ -1695,7 +1753,7 @@ test "snapshot codec preserves semantic cells and selection" {
     try dec.finish();
     try std.testing.expectEqual(source.id, decoded.id);
     try std.testing.expectEqual(source.viewport_offset, decoded.viewport_offset);
-    try std.testing.expectEqual(vt.mouse.PointerShape.pointer, decoded.modes.pointer_shape);
+    try std.testing.expectEqual(vt.mouse.PointerShape.grabbing, decoded.pointer_shape);
     try std.testing.expectEqual(source.cells[0], decoded.cells[0]);
     try std.testing.expectEqual(source.cells[1], decoded.cells[1]);
     try std.testing.expectEqual(source.cells[2], decoded.cells[2]);
@@ -1709,6 +1767,37 @@ test "snapshot codec preserves semantic cells and selection" {
     try std.testing.expectEqual(@as(u64, 11), decoded.images[0].generation);
     try std.testing.expectEqualSlices(Placement, &placements, decoded.placements);
 
+    inline for (std.meta.fields(vt.mouse.PointerShape)) |field| {
+        var candidate = source;
+        candidate.pointer_shape = @enumFromInt(field.value);
+        var shape_enc = Encoder.init(alloc);
+        defer shape_enc.deinit();
+        try candidate.encode(&shape_enc);
+        var shape_dec: Decoder = .{ .bytes = shape_enc.slice() };
+        var shape_snapshot = try Snapshot.decode(&shape_dec, alloc);
+        defer shape_snapshot.deinit(alloc);
+        try shape_dec.finish();
+        try std.testing.expectEqual(candidate.pointer_shape, shape_snapshot.pointer_shape);
+    }
+
+    const invalid_modes = try alloc.dupe(u8, enc.slice());
+    defer alloc.free(invalid_modes);
+    invalid_modes[40] |= 0xc0;
+    var invalid_modes_dec: Decoder = .{ .bytes = invalid_modes };
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        Snapshot.decode(&invalid_modes_dec, alloc),
+    );
+
+    const invalid_pointer = try alloc.dupe(u8, enc.slice());
+    defer alloc.free(invalid_pointer);
+    invalid_pointer[41] = 34;
+    var invalid_pointer_dec: Decoder = .{ .bytes = invalid_pointer };
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        Snapshot.decode(&invalid_pointer_dec, alloc),
+    );
+
     // The decoder independently rejects a snapshot-local cell id outside the
     // appended table, even if a compromised daemon bypasses Snapshot.encode.
     const corrupted = try alloc.dupe(u8, enc.slice());
@@ -1717,6 +1806,7 @@ test "snapshot codec preserves semantic cells and selection" {
     _ = try locator.int(u64);
     inline for (0..4) |_| _ = try locator.int(u16);
     inline for (0..3) |_| _ = try locator.int(u64);
+    _ = try locator.byte();
     _ = try locator.byte();
     inline for (0..3) |_| _ = try locator.boolean();
     const title_len = try locator.int(u32);

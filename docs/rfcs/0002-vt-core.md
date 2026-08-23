@@ -71,7 +71,7 @@ the omitted and explicit-zero forms, `CSI > q` and `CSI > 0 q`, and reply in
 xterm's 7-bit form:
 
 ```text
-DCS >|boringterminal 0.5.0 ST
+DCS >|boringterminal 0.6.0 ST
 ```
 
 The semantic version comes from the same compile-time product constant used
@@ -338,12 +338,16 @@ OSC 22 changes the native pointer over terminal content. The pure terminal
 owns the requested shape so it survives viewer replacement and split-pane
 focus changes; AppKit policy remains outside `src/vt/`.
 
-The first interoperable set is deliberately small and exact:
+The initial interoperable set was deliberately small:
 
 - `text` and xterm's `xterm` select the text I-beam;
 - `default` and `left_ptr` select the arrow;
 - `pointer`, `hand`, and `hand2` select the pointing hand;
 - `crosshair` and `cross` select the crosshair.
+
+RFC 0024 completes the surface with the 34 canonical CSS pointer names and
+the xterm/Xcursor aliases applications use for drag-and-drop and directional
+resize. Its mapping table is normative.
 
 An empty or unknown value resets to `text`, matching xterm's fallback to its
 default `xterm` pointer rather than retaining stale application state. RIS
@@ -351,11 +355,11 @@ also resets to `text`; DECSTR does not. Accepted changes increment the
 terminal state generation; the daemon's ordinary output invalidation therefore
 publishes a new snapshot even though the sequence paints no cells.
 
-Attach dialect 18 carries the four-state value in the two formerly reserved
-snapshot-mode bits. Public v13/v10 snapshots encode those bits as zero, which
-decodes honestly as the historical text default. A future expansion to the
-full CSS cursor-name set requires another explicit dialect; unimplemented
-names are consumed and never printed.
+Attach dialect 18 carried the original four-state value in the two formerly
+reserved snapshot-mode bits. RFC 0024 allocates dialect 19, restores those bits
+to reserved zero, and carries the bounded six-state pointer in a separately
+validated byte. A viewer-only v18 adapter preserves released sessions;
+unimplemented names remain consumed and never printed.
 
 Native cursor precedence is local and deterministic: Command-hover over an
 OSC 8 hyperlink temporarily wins with the pointing hand, otherwise the OSC

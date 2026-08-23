@@ -201,6 +201,13 @@ capsule or fixture. Public v13/v10 snapshots contain zero in both bits; the
 current canonical decoder therefore obtains the truthful historical text
 default without a legacy branch. The compatibility window remains v13/v10.
 
+Attach dialect 19 moves RFC 0024's complete pointer-shape vocabulary to a
+separate validated snapshot byte and returns the old two bits to reserved zero.
+Because dialect 18 shipped in v0.5.0, the v0.6.0 release retains its frozen
+viewer-only snapshot adapter alongside v13. That release rotation removes the
+v10 capsule and fixture, leaving current v19 plus the two preceding public
+dialects, v18 and v13.
+
 A v10 or v13 daemon with sessions is not killed merely to enable newer
 enhancements. Because those daemons have no atomic `stop_if_idle`, they are not
 terminated automatically even after one viewer observes an empty registry:
@@ -299,10 +306,10 @@ loop.
 Automated integration coverage must include:
 
 - current viewer/current daemon negotiation;
-- current viewer/v10 and v13 fixture negotiation, exact frozen frames,
+- current viewer/v18 and v13 fixture negotiation, exact frozen frames,
   snapshot, title, and input;
-- v10/v13 downgrade encoding for ordinary keys and committed UTF-8 text;
-- v10 snapshot translation and proof that search/create-beside are not sent;
+- v18 current-shape encoding plus v13 downgrade encoding for ordinary keys
+  and committed UTF-8 text;
 - an empty old daemon draining and being replaced by the bundled daemon;
 - `stop_if_idle` refusing both a live session and another attached viewer;
 - create and attach racing `stop_if_idle` without loss or duplicate daemons;
@@ -319,9 +326,10 @@ dialect's released daemon, replaces the app bundle, opens the new viewer, and
 proves the same child pid and retained output remain usable. It also proves the
 visible pending menu state. For lifecycle-capable predecessors, closing the
 final old session and reopening the app must prove that the daemon pid and
-attach dialect changed to the bundled release. The v10/v13 migrations instead
-verify their explicit restart panel because those daemons cannot provide
-atomic idle shutdown.
+attach dialect changed to the bundled release. The retained v13 migration
+instead verifies its explicit restart panel because that daemon cannot provide
+atomic idle shutdown. Older unsupported peers remain covered by the safe
+recovery path without a compatibility capsule.
 
 ## Rejected alternatives
 

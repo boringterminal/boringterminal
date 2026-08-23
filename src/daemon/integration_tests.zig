@@ -860,15 +860,15 @@ test "daemon command and event connections survive subscription replacement" {
     }
     try std.testing.expect(saw_hyperlink);
 
-    // RFC 0002 / attach dialect 18 keeps OSC 22 as daemon-owned terminal
+    // RFC 0024 / attach dialect 19 keeps OSC 22 as daemon-owned terminal
     // state, including when the sequence paints no cells.
-    try client.writeInput(created.id, "printf '\\033]22;pointer\\033\\\\'\n");
+    try client.writeInput(created.id, "printf '\\033]22;grabbing\\033\\\\'\n");
     var saw_pointer_shape = false;
     attempts = 0;
     while (!saw_pointer_shape and attempts < 100) : (attempts += 1) {
         var pointer_snapshot = try client.snapshot(created.id);
         defer pointer_snapshot.deinit(alloc);
-        saw_pointer_shape = pointer_snapshot.modes.pointer_shape == .pointer;
+        saw_pointer_shape = pointer_snapshot.pointer_shape == .grabbing;
         if (!saw_pointer_shape) try io.sleep(.fromMilliseconds(20), .awake);
     }
     try std.testing.expect(saw_pointer_shape);
