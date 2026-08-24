@@ -104,7 +104,17 @@ function shell({ title, description, body, bodyClass = '' }) {
 <meta name="description" content="${esc(description)}">
 <meta property="og:title" content="${esc(title)}">
 <meta property="og:description" content="${esc(description)}">
-<meta property="og:image" content="${SITE.url}/icon.png">
+<meta property="og:type" content="website">
+<meta property="og:image" content="${SITE.url}/social-preview.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Boring Terminal — A terminal for many sessions.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${esc(title)}">
+<meta name="twitter:description" content="${esc(description)}">
+<meta name="twitter:image" content="${SITE.url}/social-preview.png">
+<meta name="twitter:image:alt" content="Boring Terminal — A terminal for many sessions.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
