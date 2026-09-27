@@ -79,6 +79,9 @@ the repository-scoped `GITHUB_TOKEN`. New releases prepend the Gatekeeper
 notice below to their generated notes. No signing secrets are required.
 When `docs/releases/<tag>.md` exists, the workflow includes those reviewed
 user-facing notes after the signing notice and before generated commit notes.
+Failed unit/integration steps attach a bounded diagnostic excerpt as a check
+annotation. This exposes actionable test errors even when full Actions logs
+require an authenticated session; successful checks keep their ordinary output.
 
 ## Gatekeeper
 

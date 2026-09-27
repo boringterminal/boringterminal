@@ -36,8 +36,15 @@ jobs:
         run: /bin/bash scripts/test-macos-signing.sh
 
       - name: Run unit and integration tests
+        id: tests
         # Keep compatibility codecs out of the persistent daemon.
-        run: python3 scripts/check-daemon-imports.py && zig build test -Dportable-system-goldens=true
+        run: |
+          python3 scripts/check-daemon-imports.py
+          zig build test -Dportable-system-goldens=true 2>&1 | tee "${RUNNER_TEMP}/boringterminal-tests.log"
+
+      - name: Report test diagnostics
+        if: failure() && steps.tests.outcome == 'failure'
+        run: python3 scripts/report-test-failure.py "${RUNNER_TEMP}/boringterminal-tests.log"
 
       - name: Run Kitty keyboard conformance ratchet
         run: zig build kitty-keyboard-conformance
