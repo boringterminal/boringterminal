@@ -130,7 +130,7 @@ The current retained-dialect record is:
 
 | Role | Dialect | Public releases |
 | --- | ---: | --- |
-| current | 20 | v0.7.0, RFC 0025 |
+| current | 20 | v0.7.1, RFC 0025 |
 | retained | 19 | v0.6.0 |
 | retained | 18 | v0.5.0 |
 

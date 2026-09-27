@@ -208,7 +208,7 @@ viewer-only snapshot adapter alongside v13. That release rotation removes the
 v10 capsule and fixture, leaving current v19 plus the two preceding public
 dialects, v18 and v13.
 
-The v0.7.0 recovery feature (RFC 0025) uses dialect 20. Its
+The v0.7.1 recovery feature (RFC 0025) uses dialect 20. Its
 compatibility window is current 20 plus public 19 (v0.6.0, commit
 `8c83190145da83c6961ffcb379a007a4918a9d83`) and 18 (v0.5.0, commit
 `ab73f48424d96fb53547e94f1c48ca67ee8bdf49`). The v13 production capsule and
