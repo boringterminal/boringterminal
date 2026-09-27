@@ -11,6 +11,8 @@ const pty_mod = @import("../shell/pty.zig");
 const working_directory = @import("../shell/working_directory.zig");
 const vt = @import("../vt.zig");
 const c = std.c;
+const recovery = @import("recovery.zig");
+const recovery_store = @import("recovery_store.zig");
 
 const Daemon = struct {
     gpa: std.mem.Allocator,
@@ -20,6 +22,7 @@ const Daemon = struct {
     display: display_registry.Registry,
     next_session_id: u64 = 1,
     registry_mutex: std.Io.Mutex = .init,
+    workspace_mutex: std.Io.Mutex = .init,
     watchers_mutex: std.Io.Mutex = .init,
     watchers: std.ArrayList(c.fd_t) = .empty,
     focus_owner_fd: c.fd_t = -1,
@@ -32,7 +35,42 @@ const Daemon = struct {
     shutting_down: std.atomic.Value(bool) = .init(false),
     listener_fd: std.atomic.Value(c.fd_t) = .init(-1),
     listener_closed: std.atomic.Value(bool) = .init(false),
+    recovery_store: ?recovery_store.Store = null,
+    recovery_enabled: bool = false,
+    recovery_mutex: std.Io.Mutex = .init,
+    recovery_dirty: std.atomic.Value(bool) = .init(false),
+    recovery_failed: std.atomic.Value(bool) = .init(false),
+    last_selected_id: ?u64 = null,
+    dormant: std.ArrayList(Dormant) = .empty,
 };
+
+const Dormant = struct {
+    id: u64,
+    entry: recovery.Entry,
+    phase: protocol.RecoveryPhase = .dormant,
+
+    fn deinit(self: *Dormant) void {
+        daemon.gpa.free(self.entry.title);
+        if (self.entry.cwd) |cwd| daemon.gpa.free(cwd);
+    }
+};
+
+fn findDormantLocked(id: u64) ?usize {
+    for (daemon.dormant.items, 0..) |entry, index| if (entry.id == id) return index;
+    return null;
+}
+
+fn encodeDormant(enc: *protocol.Encoder, dormant: Dormant) !void {
+    try protocol.encodeMetadata(enc, .{
+        .id = dormant.id,
+        .title = @constCast(dormant.entry.title),
+        .cwd = if (dormant.entry.cwd) |cwd| @constCast(cwd) else null,
+        .exited = false,
+        .working = false,
+        .attention = false,
+        .phase = dormant.phase,
+    });
+}
 
 const graphics_slot_count = 3;
 const max_graphics_staging_bytes: usize = 128 * 1024 * 1024;
@@ -67,6 +105,148 @@ const GraphicsPool = struct {
 
 var daemon: *Daemon = undefined;
 
+fn initializeRecovery() void {
+    const store = if (daemon.recovery_store) |*value| value else return;
+    store.load() catch {
+        daemon.recovery_failed.store(true, .release);
+        return; // Preserve corrupt/unknown source; never checkpoint over it.
+    };
+    var random_epoch: [8]u8 = undefined;
+    daemon.io.random(&random_epoch);
+    const epoch = std.mem.readInt(u64, &random_epoch, .little) | 1;
+    var next = recovery.Document.init(daemon.gpa) catch return;
+    defer next.deinit();
+    next.state = store.document.state.interrupted(next.allocator(), epoch) catch {
+        daemon.recovery_failed.store(true, .release);
+        return;
+    };
+    store.commit(next.state, false) catch {
+        daemon.recovery_failed.store(true, .release);
+        return;
+    };
+    daemon.recovery_enabled = true;
+}
+
+/// Use the captured set: a child may exit between copying entries and layout.
+/// registry_mutex held; do not re-read its independently changing exit flag.
+fn recoveryIdLocked(runtime_id: u64, entries: []const recovery.Entry) ?u64 {
+    if (findDormantLocked(runtime_id)) |index| return daemon.dormant.items[index].entry.id;
+    const index = findSessionIndexLocked(runtime_id) orelse return null;
+    const session = daemon.sessions.sessions.items[index];
+    for (entries) |entry| if (entry.id == session.recovery_id) return entry.id;
+    return null;
+}
+
+fn captureRecoveryWorkspace(alloc: std.mem.Allocator) !recovery.Workspace {
+    var entries: std.ArrayList(recovery.Entry) = .empty;
+    var items: std.ArrayList(recovery.Item) = .empty;
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    defer daemon.registry_mutex.unlock(daemon.io);
+    if (daemon.sessions.sessions.items.len + daemon.dormant.items.len > recovery.max_entries) return error.RecoveryLimit;
+    for (daemon.dormant.items) |dormant| {
+        var entry = dormant.entry;
+        entry.title = try alloc.dupe(u8, entry.title);
+        if (entry.cwd) |cwd| entry.cwd = try alloc.dupe(u8, cwd);
+        try entries.append(alloc, entry);
+    }
+    for (daemon.sessions.sessions.items) |session| {
+        if (session.exited.load(.acquire)) continue;
+        var title_buf: [512]u8 = undefined;
+        const title = session.copyTitleSnapshot(&title_buf);
+        var entry: recovery.Entry = .{
+            .id = session.recovery_id,
+            .title = try alloc.dupe(u8, if (recovery.validText(title, 512)) title else "Boring Terminal"),
+        };
+        session.cwd_mutex.lockUncancelable(daemon.io);
+        defer session.cwd_mutex.unlock(daemon.io);
+        const cwd = if (session.cwd_len != 0)
+            session.cwd_buf[0..session.cwd_len]
+        else
+            session.recovery_cwd_buf[0..session.recovery_cwd_len];
+        if (recovery.validCwd(cwd)) entry.cwd = try alloc.dupe(u8, cwd);
+        entry.cwd_source = if (session.cwd_len != 0) .osc7 else if (session.recovery_cwd_sampled) .process else .initial;
+        entry.cwd_observed_at = if (session.cwd_len != 0) session.cwd_observed_at else session.recovery_cwd_observed_at;
+        try entries.append(alloc, entry);
+    }
+    for (daemon.display.items.items) |item| switch (item) {
+        .single => |id| if (recoveryIdLocked(id, entries.items)) |saved| try items.append(alloc, .{ .left = saved }),
+        .pair => |pair| {
+            const left = recoveryIdLocked(pair.left, entries.items);
+            const right = recoveryIdLocked(pair.right, entries.items);
+            if (left != null and right != null) {
+                try items.append(alloc, .{
+                    .left = left.?,
+                    .right = right.?,
+                    .focus_right = pair.focused == .right,
+                    .ratio = pair.ratio,
+                    .zoomed = pair.zoomed,
+                });
+            } else if (left orelse right) |survivor| {
+                try items.append(alloc, .{ .left = survivor });
+            }
+        },
+    };
+    return .{
+        .entries = entries.items,
+        .items = items.items,
+        .selected = if (daemon.last_selected_id) |id| recoveryIdLocked(id, entries.items) else null,
+    };
+}
+
+fn checkpointRecovery(scrub_previous: bool) !void {
+    daemon.workspace_mutex.lockUncancelable(daemon.io);
+    defer daemon.workspace_mutex.unlock(daemon.io);
+    return checkpointRecoveryLocked(scrub_previous);
+}
+
+fn checkpointRecoveryLocked(scrub_previous: bool) !void {
+    daemon.recovery_mutex.lockUncancelable(daemon.io);
+    defer daemon.recovery_mutex.unlock(daemon.io);
+    if (!daemon.recovery_enabled) return error.RecoveryUnavailable;
+    const store = &daemon.recovery_store.?;
+    var candidate = try recovery.Document.init(daemon.gpa);
+    defer candidate.deinit();
+    candidate.state = store.document.state;
+    candidate.state.current = try captureRecoveryWorkspace(candidate.allocator());
+    try store.commit(candidate.state, scrub_previous);
+    if (daemon.recovery_failed.swap(false, .acq_rel)) deliverEvent(0, .{ .registry = true });
+}
+
+fn recoveryLoop() void {
+    var sample_tick: usize = 0;
+    var sample_index: usize = 0;
+    while (!daemon.shutting_down.load(.acquire)) {
+        daemon.io.sleep(.fromMilliseconds(250), .awake) catch return;
+        sample_tick += 1;
+        if (sample_tick >= 20) {
+            var sessions: [16]*session_mod.Session = undefined;
+            var count: usize = 0;
+            daemon.registry_mutex.lockUncancelable(daemon.io);
+            const total = daemon.sessions.sessions.items.len;
+            while (sample_index < total and count < sessions.len) : (sample_index += 1) {
+                const session = daemon.sessions.sessions.items[sample_index];
+                session.retain();
+                sessions[count] = session;
+                count += 1;
+            }
+            if (sample_index >= total) {
+                sample_index = 0;
+                sample_tick = 0;
+            }
+            daemon.registry_mutex.unlock(daemon.io);
+            for (sessions[0..count]) |session| {
+                if (session.sampleRecoveryWorkingDirectory()) daemon.recovery_dirty.store(true, .release);
+                session.release();
+            }
+        }
+        if (!daemon.recovery_dirty.swap(false, .acq_rel)) continue;
+        checkpointRecovery(false) catch {
+            // A new metadata/user operation can retry; no tight disk-error loop.
+            if (!daemon.recovery_failed.swap(true, .acq_rel)) deliverEvent(0, .{ .registry = true });
+        };
+    }
+}
+
 pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) !void {
     daemon = try gpa.create(Daemon);
     daemon.* = .{
@@ -84,6 +264,14 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
     defer gpa.free(support_dir_z);
     if (c.chmod(support_dir_z.ptr, 0o700) != 0) return error.SetPermissionsFailed;
 
+    daemon.recovery_store = recovery_store.Store.open(gpa, io, support_dir) catch |err| switch (err) {
+        error.RecoveryWriterBusy => return, // Another new daemon owns startup.
+        else => blk: {
+            daemon.recovery_failed.store(true, .release);
+            break :blk null;
+        },
+    };
+
     const socket_path = try protocol.socketPath(gpa, env);
     defer gpa.free(socket_path);
     const address = try std.Io.net.UnixAddress.init(socket_path);
@@ -91,10 +279,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
         error.AddressInUse => blk: {
             // A live winner owns the path. A stale inode is safe to remove
             // only after connect proves nobody is listening.
-            if (address.connect(io)) |stream| {
-                stream.close(io);
+            if (@import("unix_connect.zig").connect(socket_path)) |fd| {
+                _ = c.close(fd);
                 return;
-            } else |_| {}
+            } else |connect_err| switch (connect_err) {
+                error.ConnectionRefused, error.FileNotFound => {},
+                else => return connect_err,
+            }
             std.Io.Dir.deleteFileAbsolute(io, socket_path) catch |delete_err| switch (delete_err) {
                 error.FileNotFound => {},
                 else => return delete_err,
@@ -110,6 +301,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
     const socket_path_z = try gpa.dupeZ(u8, socket_path);
     defer gpa.free(socket_path_z);
     if (c.chmod(socket_path_z.ptr, 0o600) != 0) return error.SetPermissionsFailed;
+
+    initializeRecovery();
+    if (daemon.recovery_enabled) {
+        const worker = std.Thread.spawn(.{}, recoveryLoop, .{}) catch null;
+        if (worker) |thread| thread.detach() else daemon.recovery_failed.store(true, .release);
+    }
 
     while (true) {
         const stream = server.accept(io) catch {
@@ -216,7 +413,7 @@ fn sendLifecycleStatus(fd: c.fd_t) !void {
     const payload = try lifecycle.encodeStatus(daemon.gpa, .{
         .product_version = product_version.semantic,
         .dialects = &dialects,
-        .session_count = @intCast(daemon.sessions.sessions.items.len),
+        .session_count = @intCast(daemon.sessions.sessions.items.len + daemon.dormant.items.len),
         .attach_connection_count = daemon.attach_connections,
         .draining = daemon.draining.load(.acquire),
     });
@@ -225,9 +422,11 @@ fn sendLifecycleStatus(fd: c.fd_t) !void {
 }
 
 fn stopIfIdle(fd: c.fd_t) void {
+    daemon.workspace_mutex.lockUncancelable(daemon.io);
+    defer daemon.workspace_mutex.unlock(daemon.io);
     daemon.lifecycle_mutex.lockUncancelable(daemon.io);
     daemon.registry_mutex.lockUncancelable(daemon.io);
-    const idle = daemon.sessions.sessions.items.len == 0 and
+    const idle = daemon.sessions.sessions.items.len == 0 and daemon.dormant.items.len == 0 and
         daemon.attach_connections == 0 and !daemon.draining.load(.acquire);
     if (idle) daemon.draining.store(true, .release);
     daemon.registry_mutex.unlock(daemon.io);
@@ -241,18 +440,29 @@ fn stopIfIdle(fd: c.fd_t) void {
 }
 
 fn terminateAll(fd: c.fd_t) void {
+    daemon.workspace_mutex.lockUncancelable(daemon.io);
+    var workspace_held = true;
+    defer if (workspace_held) daemon.workspace_mutex.unlock(daemon.io);
     daemon.lifecycle_mutex.lockUncancelable(daemon.io);
     daemon.draining.store(true, .release);
     daemon.lifecycle_mutex.unlock(daemon.io);
     while (true) {
         daemon.registry_mutex.lockUncancelable(daemon.io);
         const id = if (daemon.sessions.sessions.items.len == 0)
-            null
+            (if (daemon.dormant.items.len == 0) null else daemon.dormant.items[0].id)
         else
             daemon.sessions.sessions.items[0].id;
         daemon.registry_mutex.unlock(daemon.io);
-        closeSession(id orelse break) catch break;
+        closeSession(id orelse break) catch {
+            daemon.draining.store(false, .release);
+            lifecycle.writeFrame(fd, .protocol_error, "session removal could not be saved") catch {};
+            return;
+        };
     }
+    // Let in-flight activation observe the drain and reap unpublished children
+    // during the grace period, rather than holding it until process exit.
+    daemon.workspace_mutex.unlock(daemon.io);
+    workspace_held = false;
     lifecycle.writeFrame(fd, .ok, &.{}) catch return;
     // Preserve the ordinary HUP/grace/KILL close path before the service exits.
     daemon.io.sleep(.fromSeconds(2), .awake) catch {};
@@ -303,6 +513,14 @@ fn removeWatcher(fd: c.fd_t) void {
 }
 
 fn broadcast(session_id: u64, flags: protocol.EventFlags) void {
+    if (flags.registry or flags.metadata or flags.lifecycle)
+        daemon.recovery_dirty.store(true, .release);
+    deliverEvent(session_id, flags);
+}
+
+// Recovery status notifications invalidate the viewer registry but are not
+// workspace mutations: feeding them back into the writer would loop forever.
+fn deliverEvent(session_id: u64, flags: protocol.EventFlags) void {
     var payload: [9]u8 = undefined;
     std.mem.writeInt(u64, payload[0..8], session_id, .little);
     payload[8] = @bitCast(flags);
@@ -486,18 +704,71 @@ fn handleCommand(
     graphics_pool: ?*GraphicsPool,
 ) !void {
     var dec: protocol.Decoder = .{ .bytes = payload };
+    const changes_workspace = switch (tag) {
+        .recovery_accept, .recovery_dismiss => true,
+        .create, .create_beside, .close, .focus, .pair, .separate, .display_focus, .display_ratio, .display_move, .display_swap, .display_transfer, .display_extract, .display_zoom => true,
+        else => false,
+    };
+    if (changes_workspace) daemon.workspace_mutex.lockUncancelable(daemon.io);
+    defer if (changes_workspace) daemon.workspace_mutex.unlock(daemon.io);
     switch (tag) {
         .list => {
             try dec.finish();
             var enc = protocol.Encoder.init(daemon.gpa);
             defer enc.deinit();
+            daemon.recovery_mutex.lockUncancelable(daemon.io);
+            defer daemon.recovery_mutex.unlock(daemon.io);
             daemon.registry_mutex.lockUncancelable(daemon.io);
             defer daemon.registry_mutex.unlock(daemon.io);
-            try enc.int(u32, @intCast(daemon.sessions.sessions.items.len));
+            try enc.int(u32, @intCast(daemon.sessions.sessions.items.len + daemon.dormant.items.len));
             for (daemon.sessions.sessions.items) |session| try encodeSessionMetadata(&enc, session);
+            for (daemon.dormant.items) |dormant| try encodeDormant(&enc, dormant);
             try enc.int(u32, @intCast(daemon.display.items.items.len));
             for (daemon.display.items.items) |item| try protocol.encodeDisplayItem(&enc, item);
+            const status: protocol.RecoveryStatus = if (daemon.recovery_enabled) .{
+                .available = true,
+                .failed = daemon.recovery_failed.load(.acquire),
+                .owner_epoch = daemon.recovery_store.?.document.state.owner_epoch,
+                .generation = daemon.recovery_store.?.document.state.pending_generation,
+                .pending_count = @intCast(daemon.recovery_store.?.document.state.pending.entries.len),
+            } else .{ .failed = daemon.recovery_failed.load(.acquire) };
+            try protocol.encodeRecoveryStatus(&enc, status, daemon.last_selected_id);
             try protocol.writeFrame(fd, .session_list, enc.slice());
+        },
+        .recovery_accept, .recovery_dismiss => {
+            const generation = try dec.int(u64);
+            try dec.finish();
+            changeRecovery(generation, tag == .recovery_accept) catch |err| {
+                if (err != error.StaleRecovery and err != error.RecoveryUnavailable) {
+                    daemon.recovery_failed.store(true, .release);
+                    daemon.recovery_dirty.store(true, .release);
+                }
+                return sendProtocolError(fd, @errorName(err));
+            };
+            try sendOk(fd);
+            broadcast(0, .{ .registry = true });
+        },
+        .recovery_activate => {
+            const id = try dec.int(u64);
+            const owner_epoch = try dec.int(u64);
+            const home = try dec.boolean();
+            const retry = try dec.boolean();
+            const cols = try dec.int(u16);
+            const rows = try dec.int(u16);
+            try dec.finish();
+            if (cols < 2 or rows < 1) return sendProtocolError(fd, "invalid geometry");
+            activateRecovery(id, owner_epoch, home, retry, cols, rows) catch |err|
+                return sendProtocolError(fd, @errorName(err));
+            var enc = protocol.Encoder.init(daemon.gpa);
+            defer enc.deinit();
+            daemon.registry_mutex.lockUncancelable(daemon.io);
+            defer daemon.registry_mutex.unlock(daemon.io);
+            if (findDormantLocked(id)) |index| {
+                try encodeDormant(&enc, daemon.dormant.items[index]);
+            } else if (findSessionIndexLocked(id)) |index| {
+                try encodeSessionMetadata(&enc, daemon.sessions.sessions.items[index]);
+            } else return sendProtocolError(fd, "unknown session");
+            try protocol.writeFrame(fd, .metadata, enc.slice());
         },
         .create => {
             const request = try protocol.decodeCreateRequest(&dec);
@@ -709,7 +980,7 @@ fn handleCommand(
         .close => {
             const id = try dec.int(u64);
             try dec.finish();
-            closeSession(id) catch return sendProtocolError(fd, "unknown session");
+            closeSession(id) catch |err| return sendProtocolError(fd, @errorName(err));
             try sendOk(fd);
             broadcast(id, .{ .metadata = true, .lifecycle = true, .registry = true });
         },
@@ -1010,14 +1281,246 @@ fn createSession(
     return session;
 }
 
-fn closeSession(id: u64) !void {
+/// workspace_mutex is held for all mutations. Commit before publishing any
+/// imported entries: duplicate accept, including a lost response, is a no-op.
+const BarrierWorkspace = struct { workspace: recovery.Workspace, degraded: bool };
+
+/// A capacity error must not trap the user above the limit by preventing close
+/// or restoration. Mutate only the last complete saved generation in that case;
+/// never invent a truncated subset of today's live sessions.
+fn captureBarrierWorkspace(alloc: std.mem.Allocator, state: recovery.State) !BarrierWorkspace {
+    const current = captureRecoveryWorkspace(alloc) catch |err| switch (err) {
+        error.RecoveryLimit => return .{ .workspace = try state.current.clone(alloc), .degraded = true },
+        else => return err,
+    };
+    if (current.entries.len + state.pending.entries.len > recovery.max_entries)
+        return .{ .workspace = try state.current.clone(alloc), .degraded = true };
+    return .{ .workspace = current, .degraded = false };
+}
+
+fn changeRecovery(generation: u64, accept: bool) !void {
+    if (daemon.draining.load(.acquire)) return error.DaemonDraining;
+    daemon.recovery_mutex.lockUncancelable(daemon.io);
+    defer daemon.recovery_mutex.unlock(daemon.io);
+    if (!daemon.recovery_enabled) return error.RecoveryUnavailable;
+    const store = &daemon.recovery_store.?;
+    if (generation == 0 or generation != store.document.state.pending_generation)
+        return error.StaleRecovery;
+    if (store.document.state.pending.entries.len == 0) return;
+    var candidate = try recovery.Document.init(daemon.gpa);
+    defer candidate.deinit();
+    candidate.state = store.document.state;
+    const captured = try captureBarrierWorkspace(candidate.allocator(), candidate.state);
+    candidate.state.current = captured.workspace;
+    if (!accept) {
+        candidate.state = try candidate.state.dismiss(candidate.allocator(), generation);
+        try store.commit(candidate.state, true);
+        daemon.recovery_failed.store(captured.degraded, .release);
+        return;
+    }
+    const pending = store.document.state.pending;
+    var additions: std.ArrayList(Dormant) = .empty;
+    defer additions.deinit(daemon.gpa);
+    var transferred = false;
+    defer if (!transferred) {
+        for (additions.items) |*item| item.deinit();
+    };
+    for (pending.entries, 0..) |entry, index| {
+        var owned = entry;
+        owned.title = try daemon.gpa.dupe(u8, entry.title);
+        errdefer daemon.gpa.free(owned.title);
+        owned.cwd = if (entry.cwd) |cwd| try daemon.gpa.dupe(u8, cwd) else null;
+        errdefer if (owned.cwd) |cwd| daemon.gpa.free(cwd);
+        try additions.append(daemon.gpa, .{ .id = daemon.next_session_id + index, .entry = owned });
+    }
+    var layout: std.ArrayList(protocol.DisplayItem) = .empty;
+    defer layout.deinit(daemon.gpa);
+    for (pending.items) |item| {
+        const left = importedRuntimeId(additions.items, item.left).?;
+        try layout.append(daemon.gpa, if (item.right) |right| .{ .pair = .{
+            .left = left,
+            .right = importedRuntimeId(additions.items, right).?,
+            .focused = if (item.focus_right) .right else .left,
+            .ratio = item.ratio,
+            .zoomed = item.zoomed,
+        } } else .{ .single = left });
+    }
+    const selected = if (pending.selected) |id| importedRuntimeId(additions.items, id) else null;
     daemon.registry_mutex.lockUncancelable(daemon.io);
+    daemon.dormant.ensureUnusedCapacity(daemon.gpa, additions.items.len) catch |err| {
+        daemon.registry_mutex.unlock(daemon.io);
+        return err;
+    };
+    daemon.display.items.ensureUnusedCapacity(daemon.gpa, layout.items.len) catch |err| {
+        daemon.registry_mutex.unlock(daemon.io);
+        return err;
+    };
+    daemon.registry_mutex.unlock(daemon.io);
+    candidate.state = try candidate.state.accept(candidate.allocator(), generation);
+    try store.commit(candidate.state, true);
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    defer daemon.registry_mutex.unlock(daemon.io);
+    daemon.dormant.appendSliceAssumeCapacity(additions.items);
+    daemon.display.items.appendSliceAssumeCapacity(layout.items);
+    daemon.next_session_id += additions.items.len;
+    if (selected) |id| daemon.last_selected_id = id;
+    transferred = true;
+    daemon.recovery_failed.store(captured.degraded, .release);
+}
+
+fn importedRuntimeId(entries: []const Dormant, recovery_id: u64) ?u64 {
+    for (entries) |entry| if (entry.entry.id == recovery_id) return entry.id;
+    return null;
+}
+
+fn activateRecovery(id: u64, owner_epoch: u64, home: bool, retry: bool, cols: u16, rows: u16) !void {
+    daemon.workspace_mutex.lockUncancelable(daemon.io);
+    var workspace_held = true;
+    defer if (workspace_held) daemon.workspace_mutex.unlock(daemon.io);
+    if (!daemon.recovery_enabled or owner_epoch == 0 or
+        owner_epoch != daemon.recovery_store.?.document.state.owner_epoch) return error.StaleRecoveryEpoch;
+    if (daemon.draining.load(.acquire)) return error.DaemonDraining;
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    const index = findDormantLocked(id) orelse {
+        const exists = findSessionIndexLocked(id) != null;
+        daemon.registry_mutex.unlock(daemon.io);
+        if (exists) return;
+        return error.UnknownSession;
+    };
+    const dormant = daemon.dormant.items[index];
+    if (dormant.phase == .starting or (dormant.phase != .dormant and !retry and !home)) {
+        daemon.registry_mutex.unlock(daemon.io);
+        return;
+    }
+    // Copy metadata before dropping the mutation lock: the user can close,
+    // reorder, or drain this entry while macOS waits for filesystem consent.
+    const recovery_id = dormant.entry.id;
+    var cwd_buf: [recovery.max_cwd_bytes]u8 = undefined;
+    const source = (if (home) daemon.env.get("HOME") else dormant.entry.cwd orelse daemon.env.get("HOME")) orelse "";
+    if (!recovery.validCwd(source)) {
+        daemon.dormant.items[index].phase = .cwd_unavailable;
+        daemon.registry_mutex.unlock(daemon.io);
+        broadcast(id, .{ .metadata = true, .registry = true });
+        return;
+    }
+    @memcpy(cwd_buf[0..source.len], source);
+    const cwd = cwd_buf[0..source.len];
+    daemon.dormant.items[index].phase = .starting;
+    daemon.registry_mutex.unlock(daemon.io);
+    daemon.workspace_mutex.unlock(daemon.io);
+    workspace_held = false;
+    broadcast(id, .{ .metadata = true, .registry = true });
+    defer if (comptime @hasDecl(@import("root"), "activationFinished"))
+        @import("root").activationFinished(daemon.io, daemon.env);
+    if (comptime @hasDecl(@import("root"), "activationGate"))
+        try @import("root").activationGate(daemon.io, daemon.env, "before_spawn", null);
+    const session = session_mod.Session.createRecovering(
+        daemon.gpa,
+        daemon.io,
+        daemon.env,
+        id,
+        cols,
+        rows,
+        cwd,
+    ) catch |err| {
+        setActivationFailure(id, switch (err) {
+            error.WorkingDirectoryDenied => .cwd_denied,
+            error.WorkingDirectoryUnavailable => .cwd_unavailable,
+            else => .spawn_failed,
+        });
+        return;
+    };
+    var owned = true;
+    defer if (owned) session.destroyUnstarted();
+    if (comptime @hasDecl(@import("root"), "activationGate"))
+        try @import("root").activationGate(daemon.io, daemon.env, "before_publish", session.pty.child);
+    daemon.workspace_mutex.lockUncancelable(daemon.io);
+    workspace_held = true;
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    const current_index = findDormantLocked(id) orelse {
+        daemon.registry_mutex.unlock(daemon.io);
+        return error.UnknownSession; // Closed while waiting: never publish.
+    };
+    if (daemon.draining.load(.acquire)) {
+        daemon.registry_mutex.unlock(daemon.io);
+        return error.DaemonDraining;
+    }
+    daemon.sessions.sessions.ensureUnusedCapacity(daemon.gpa, 1) catch |err| {
+        daemon.dormant.items[current_index].phase = .spawn_failed;
+        daemon.registry_mutex.unlock(daemon.io);
+        broadcast(id, .{ .metadata = true, .registry = true });
+        return err;
+    };
+    daemon.registry_mutex.unlock(daemon.io);
+    session.recovery_id = recovery_id;
+    session.startReader(daemonSessionChanged) catch {
+        setActivationFailure(id, .spawn_failed);
+        return;
+    };
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    daemon.sessions.sessions.appendAssumeCapacity(session);
+    var removed = daemon.dormant.orderedRemove(current_index);
+    removed.deinit();
+    if (daemon.focused_session_id == id) session.setFocused(true);
+    daemon.registry_mutex.unlock(daemon.io);
+    owned = false;
+    broadcast(id, .{ .metadata = true, .registry = true });
+}
+
+fn setActivationFailure(id: u64, phase: protocol.RecoveryPhase) void {
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    if (findDormantLocked(id)) |index| daemon.dormant.items[index].phase = phase;
+    daemon.registry_mutex.unlock(daemon.io);
+    broadcast(id, .{ .metadata = true, .registry = true });
+}
+
+fn persistRemoval(id: u64) !void {
+    daemon.recovery_mutex.lockUncancelable(daemon.io);
+    defer daemon.recovery_mutex.unlock(daemon.io);
+    // Corrupt/future state is preserved and recovery reports unavailable. It
+    // must not prevent closing ordinary live terminals.
+    if (!daemon.recovery_enabled) return;
+    const store = &daemon.recovery_store.?;
+    var candidate = try recovery.Document.init(daemon.gpa);
+    defer candidate.deinit();
+    candidate.state = store.document.state;
+    const captured = try captureBarrierWorkspace(candidate.allocator(), candidate.state);
+    const current = captured.workspace;
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    const saved_id = recoveryIdLocked(id, current.entries);
+    daemon.registry_mutex.unlock(daemon.io);
+    candidate.state.current = if (saved_id) |saved|
+        try current.removing(candidate.allocator(), saved)
+    else
+        current;
+    store.commit(candidate.state, true) catch {
+        daemon.recovery_failed.store(true, .release);
+        // A failure after rename may already have replaced the primary. Queue
+        // one reconciliation of the unchanged live intent, not a retry loop.
+        daemon.recovery_dirty.store(true, .release);
+        return error.RecoveryRemovalNotSaved;
+    };
+    daemon.recovery_failed.store(captured.degraded, .release);
+}
+
+fn closeSession(id: u64) !void {
+    try persistRemoval(id);
+    daemon.registry_mutex.lockUncancelable(daemon.io);
+    if (findDormantLocked(id)) |index| {
+        var dormant = daemon.dormant.orderedRemove(index);
+        dormant.deinit();
+        daemon.display.removeSession(id) catch unreachable;
+        if (daemon.last_selected_id == id) daemon.last_selected_id = null;
+        daemon.registry_mutex.unlock(daemon.io);
+        return;
+    }
     const index = findSessionIndexLocked(id) orelse {
         daemon.registry_mutex.unlock(daemon.io);
         return error.UnknownSession;
     };
     const session = daemon.sessions.remove(index).?;
     daemon.display.removeSession(id) catch unreachable;
+    if (daemon.last_selected_id == id) daemon.last_selected_id = null;
     daemon.registry_mutex.unlock(daemon.io);
     if (!session.exited.load(.acquire)) {
         session.pty.hangup();
@@ -1062,7 +1565,7 @@ fn setFocus(fd: c.fd_t, id: u64, focused: bool) bool {
     daemon.registry_mutex.lockUncancelable(daemon.io);
     defer daemon.registry_mutex.unlock(daemon.io);
     if (focused) {
-        var exists = false;
+        var exists = findDormantLocked(id) != null;
         for (daemon.sessions.sessions.items) |session| {
             if (session.id == id) {
                 exists = true;
@@ -1077,6 +1580,10 @@ fn setFocus(fd: c.fd_t, id: u64, focused: bool) bool {
     } else if (daemon.focus_owner_fd != fd) return true;
     daemon.focus_owner_fd = if (focused) fd else -1;
     daemon.focused_session_id = if (focused) id else null;
+    if (focused) {
+        daemon.last_selected_id = id;
+        daemon.recovery_dirty.store(true, .release);
+    }
     for (daemon.sessions.sessions.items) |session| {
         session.setFocused(focused and session.id == id);
     }

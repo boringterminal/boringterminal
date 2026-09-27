@@ -208,6 +208,15 @@ viewer-only snapshot adapter alongside v13. That release rotation removes the
 v10 capsule and fixture, leaving current v19 plus the two preceding public
 dialects, v18 and v13.
 
+The v0.7.0 recovery feature (RFC 0025) uses dialect 20. Its
+compatibility window is current 20 plus public 19 (v0.6.0, commit
+`8c83190145da83c6961ffcb379a007a4918a9d83`) and 18 (v0.5.0, commit
+`ab73f48424d96fb53547e94f1c48ca67ee8bdf49`). The v13 production capsule and
+attach fixtures are retired at this boundary. Historical keyboard-regression
+oracles remain test-only so the conformance ratchet does not shrink. Neither
+retained daemon receives recovery commands; their sessions stay usable and the
+restore controls are unavailable until the normal safe upgrade.
+
 A v10 or v13 daemon with sessions is not killed merely to enable newer
 enhancements. Because those daemons have no atomic `stop_if_idle`, they are not
 terminated automatically even after one viewer observes an empty registry:
@@ -306,9 +315,9 @@ loop.
 Automated integration coverage must include:
 
 - current viewer/current daemon negotiation;
-- current viewer/v18 and v13 fixture negotiation, exact frozen frames,
+- current viewer/v19 and v18 fixture negotiation, exact frozen frames,
   snapshot, title, and input;
-- v18 current-shape encoding plus v13 downgrade encoding for ordinary keys
+- v19 and v18 exact semantic encoding for ordinary keys
   and committed UTF-8 text;
 - an empty old daemon draining and being replaced by the bundled daemon;
 - `stop_if_idle` refusing both a live session and another attached viewer;
@@ -326,9 +335,7 @@ dialect's released daemon, replaces the app bundle, opens the new viewer, and
 proves the same child pid and retained output remain usable. It also proves the
 visible pending menu state. For lifecycle-capable predecessors, closing the
 final old session and reopening the app must prove that the daemon pid and
-attach dialect changed to the bundled release. The retained v13 migration
-instead verifies its explicit restart panel because that daemon cannot provide
-atomic idle shutdown. Older unsupported peers remain covered by the safe
+attach dialect changed to the bundled release. Older unsupported peers remain covered by the safe
 recovery path without a compatibility capsule.
 
 ## Rejected alternatives

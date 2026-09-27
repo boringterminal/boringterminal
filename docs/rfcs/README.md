@@ -40,6 +40,7 @@ things are the way they are.
 | [0022](0022-transient-graphics-materialization.md) | Transient graphics materialization | draft |
 | [0023](0023-frame-pipelined-graphics-uploads.md) | Frame-pipelined graphics uploads | accepted |
 | [0024](0024-osc22-pointer-shapes.md) | Complete OSC 22 pointer shapes | accepted |
+| [0025](0025-workspace-recovery.md) | Restore sessions after daemon loss | accepted |
 
 ## Conventions
 

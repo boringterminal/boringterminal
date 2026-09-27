@@ -72,11 +72,11 @@ src/daemon/
 src/shell/daemon_protocol/
   selected.zig              # the only current/retained dispatch point
   compat/
-    v18.zig                 # first retained public dialect
-    v13.zig                 # second retained public dialect
+    v19.zig                 # first retained public dialect; shared old metadata
+    v18.zig                 # second retained public dialect; snapshot prefix
 src/shell/daemon_protocol/fixtures/
+  v19/                      # frozen v0.6.0 frames
   v18/                      # frozen v0.5.0 frames
-  v13/                      # embedded frozen frames for the skew fixture
 ```
 
 The exact filenames may follow the implementation's natural Zig package
@@ -89,7 +89,7 @@ compat capsule -> current canonical value types
 ```
 
 Stable code sees a small selected-dialect value and capability result. It does
-not import `v18`/`v13`, switch on numeric versions, or know downgrade details. The
+not import `v19`/`v18`, switch on numeric versions, or know downgrade details. The
 single dispatch module may switch between `current` and retained capsules;
 nowhere else may do so. The daemon build must not link compatibility capsules.
 
@@ -130,12 +130,23 @@ The current retained-dialect record is:
 
 | Role | Dialect | Public releases |
 | --- | ---: | --- |
-| current | 19 | v0.6.0 |
+| current | 20 | v0.7.0, RFC 0025 |
+| retained | 19 | v0.6.0 |
 | retained | 18 | v0.5.0 |
-| retained | 13 | v0.4.0 |
 
 The v0.6.0 release rotation removed the v10 capsule and frozen fixtures after
 adding the exact v18 snapshot adapter derived from the v0.5.0 tag.
+
+The next-release rotation removes v13 production support and freezes the v19
+snapshot/metadata/registry shape from v0.6.0. The v18 registry and metadata have
+that same released shape, so both select the frozen v19 metadata decoder.
+Historical v13 keyboard oracles remain under `src/test_support/` solely for
+the conformance executable. They are not a third production adapter.
+
+`python3 scripts/check-daemon-imports.py` gates the daemon's repository import
+closure and its explicit external-module names in CI/release. It rejects
+viewer compatibility and test-oracle imports, including imports nested in test
+blocks, instead of relying on names surviving binary stripping.
 
 ## Feature availability
 

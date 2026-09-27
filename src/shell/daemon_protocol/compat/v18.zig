@@ -1,6 +1,5 @@
 //! Frozen viewer-side snapshot adapter for the v18 public attach dialect
-//! shipped by v0.5.0. All other v18 messages retain the current canonical
-//! layout; only pointer shape moved in v19 (RFC 0024).
+//! shipped by v0.5.0. Metadata/registry share the frozen v19 layout.
 
 const std = @import("std");
 const protocol = @import("../../../daemon/protocol.zig");
@@ -19,24 +18,6 @@ const WireModes = packed struct(u8) {
 };
 
 pub fn decodeSnapshot(dec: *protocol.Decoder, alloc: std.mem.Allocator) !protocol.Snapshot {
-    return decodeSnapshotImpl(dec, alloc, false);
-}
-
-/// Public v13 used the same snapshot prefix but required the two high bits to
-/// be reserved zero. Keeping that validation here prevents the v13 decoder
-/// from accepting v18 pointer-bearing frames under the wrong dialect.
-pub fn decodeTextOnlySnapshot(
-    dec: *protocol.Decoder,
-    alloc: std.mem.Allocator,
-) !protocol.Snapshot {
-    return decodeSnapshotImpl(dec, alloc, true);
-}
-
-fn decodeSnapshotImpl(
-    dec: *protocol.Decoder,
-    alloc: std.mem.Allocator,
-    require_text: bool,
-) !protocol.Snapshot {
     const id = try dec.int(u64);
     const cols = try dec.int(u16);
     const rows = try dec.int(u16);
@@ -47,7 +28,6 @@ fn decodeSnapshotImpl(
     const sync_output_epoch = try dec.int(u64);
     const grid_epoch = try dec.int(u64);
     const wire: WireModes = @bitCast(try dec.byte());
-    if (require_text and wire.pointer_shape != 0) return error.InvalidSnapshot;
     const pointer_shape: vt.mouse.PointerShape = switch (wire.pointer_shape) {
         0 => .text,
         1 => .default,

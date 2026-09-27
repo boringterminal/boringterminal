@@ -76,6 +76,36 @@ locally. Release builds use Zig `ReleaseSafe`: terminal input is hostile data,
 so disabling runtime safety for marginal throughput is not a distribution
 tradeoff we accept.
 
+### Stable privacy identity amendment (2026-09-27)
+
+RCA 0002 identifies a confirmed packaging limitation: every build and package
+is forcibly ad-hoc signed. That prevents testing or shipping with a stable
+certificate-backed identity, even when credentials exist. Apple's designated
+requirement for ad-hoc code is specific to that code version; a bundle ID alone
+does not preserve TCC authorization across builds.
+
+Add `-Dcodesign-identity=<identity>` to the Zig build and
+`BORINGTERMINAL_SIGNING_IDENTITY=<identity>` to the universal packager. Both
+default to `-` for credential-free development/current CI. Use one shared
+leaf-first signer, with explicit identifiers
+`com.boringterminal.BoringTerminal` for the GUI/bundle and
+`com.boringterminal.BoringTerminal.daemon` for the helper. An explicitly empty
+or unusable identity fails; never silently fall back to ad-hoc signing.
+
+Certificate signing uses the normal certificate-derived designated requirement
+and a secure timestamp. Do not install a custom identifier-only requirement,
+grant Full Disk Access, change TCC records, or use private responsibility APIs.
+This signing option does not add notarization or change helper lifetime. The
+existing release pipeline remains ad-hoc until credentials are configured;
+its public trust claims must remain truthful.
+
+Validate real Files and Folders decisions in a clean macOS GUI login/VM,
+including a helper that survives viewer exit and an app update. Do not kill
+live sessions to adopt a new signature: use RFC 0019's normal idle drain or
+the existing explicit destructive restart. Stable signing addresses identity
+churn; a repeat within one unchanged process requires separate attribution
+evidence. See [RCA 0002](../rcas/0002-filesystem-permission-prompts.md).
+
 ## Why now
 
 Attention routing needs a trustworthy application identity before it can post

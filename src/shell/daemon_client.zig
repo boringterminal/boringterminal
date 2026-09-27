@@ -120,6 +120,7 @@ pub const Session = struct {
     working: std.atomic.Value(bool) = .init(false),
     attention_pending: std.atomic.Value(bool) = .init(false),
     metadata_dirty: std.atomic.Value(bool) = .init(true),
+    recovery_phase: std.atomic.Value(protocol.RecoveryPhase) = .init(.live),
     visible: std.atomic.Value(bool) = .init(false),
 
     refresh_mutex: std.Io.Mutex = .init,
@@ -127,7 +128,10 @@ pub const Session = struct {
     refresh_requested: bool = false,
     refresh_stopping: bool = false,
     pending_resize: ?ResizeRequest = null,
+    last_resize: ?ResizeRequest = null,
     refresh_thread: ?std.Thread = null,
+    activation: ?struct { home: bool, retry: bool } = null,
+    activation_fd: c.fd_t = -1, // Protected by refresh_mutex, including close.
     refresh_context: ?*anyopaque = null,
     refresh_fn: ?RefreshFn = null,
     image_context: ?*anyopaque = null,
@@ -137,6 +141,8 @@ pub const Session = struct {
     title_mutex: std.Io.Mutex = .init,
     title_buf: [512]u8 = undefined,
     title_len: usize = 0,
+    cwd_buf: [protocol.max_working_directory_bytes]u8 = undefined,
+    cwd_len: usize = 0,
     title_dirty: bool = true,
     scroll_accum: f64 = 0,
     scroll_accum_x: f64 = 0,
@@ -191,7 +197,27 @@ pub const Session = struct {
         self.image_context = options.image_context;
         self.prepare_image_fn = options.prepare_image;
         self.prepare_staged_image_fn = options.prepare_staged_image;
+        if (self.recovery_phase.load(.acquire) != .live) return;
         self.refresh_thread = try std.Thread.spawn(.{}, refreshLoop, .{self});
+    }
+
+    pub fn requestActivation(self: *Session, home: bool, retry: bool) void {
+        self.refresh_mutex.lockUncancelable(self.io);
+        defer self.refresh_mutex.unlock(self.io);
+        if (self.refresh_stopping or self.client.isDisconnected() or !self.client.supportsRecovery()) return;
+        const phase = self.recovery_phase.load(.acquire);
+        if (phase == .live or phase == .starting or (phase != .dormant and !home and !retry)) return;
+        if (self.refresh_thread == null) {
+            self.refresh_thread = std.Thread.spawn(.{}, refreshLoop, .{self}) catch {
+                self.recovery_phase.store(.spawn_failed, .release);
+                return;
+            };
+        }
+        self.activation = .{ .home = home, .retry = retry };
+        if (self.pending_resize == null) self.pending_resize = self.last_resize;
+        self.recovery_phase.store(.starting, .release);
+        self.refresh_requested = true;
+        self.refresh_condition.signal(self.io);
     }
 
     pub fn requestRefresh(self: *Session) void {
@@ -204,20 +230,21 @@ pub const Session = struct {
     }
 
     pub fn requestResize(self: *Session, request: ResizeRequest) void {
-        if (self.refresh_thread == null) return;
         self.refresh_mutex.lockUncancelable(self.io);
         defer self.refresh_mutex.unlock(self.io);
         if (self.refresh_stopping) return;
         coalesceResize(&self.pending_resize, request);
+        self.last_resize = request;
         self.refresh_requested = true;
         self.grid_dirty.store(true, .release);
         self.refresh_condition.signal(self.io);
     }
 
-    fn stopRefreshWorker(self: *Session) void {
+    pub fn stopRefreshWorker(self: *Session) void {
         const thread = self.refresh_thread orelse return;
         self.refresh_mutex.lockUncancelable(self.io);
         self.refresh_stopping = true;
+        if (self.activation_fd >= 0) _ = c.shutdown(self.activation_fd, c.SHUT.RDWR);
         self.refresh_condition.signal(self.io);
         self.refresh_mutex.unlock(self.io);
         thread.join();
@@ -230,6 +257,8 @@ pub const Session = struct {
     }
 
     pub fn setVisible(self: *Session, visible: bool) void {
+        if (visible and self.recovery_phase.load(.acquire) == .dormant)
+            self.requestActivation(false, false);
         const was_visible = self.visible.swap(visible, .acq_rel);
         if (was_visible == visible) return;
         if (visible) self.grid_dirty.store(true, .release);
@@ -239,16 +268,30 @@ pub const Session = struct {
     fn refreshLoop(self: *Session) void {
         while (true) {
             self.refresh_mutex.lockUncancelable(self.io);
-            while (!self.refresh_requested and self.pending_resize == null and
+            while (!self.refresh_requested and self.pending_resize == null and self.activation == null and
                 !self.refresh_stopping)
             {
                 self.refresh_condition.waitUncancelable(self.io, &self.refresh_mutex);
             }
             const resize = self.pending_resize;
             self.pending_resize = null;
+            const activation = self.activation;
+            self.activation = null;
             const stopping = self.refresh_stopping;
             self.refresh_requested = false;
             self.refresh_mutex.unlock(self.io);
+
+            if (activation) |request| {
+                if (stopping) return;
+                self.activateOnWorker(request.home, request.retry, if (resize) |r| r.cols else 80, if (resize) |r| r.rows else 24) catch {
+                    self.recovery_phase.store(.spawn_failed, .release);
+                };
+                if (self.refresh_fn) |callback| callback(self.refresh_context, self.id);
+            }
+            if (self.recovery_phase.load(.acquire) != .live) {
+                if (stopping) return;
+                continue;
+            }
 
             if (resize) |request| {
                 self.client.resize(
@@ -285,6 +328,27 @@ pub const Session = struct {
         }
     }
 
+    fn activateOnWorker(self: *Session, home: bool, retry: bool, cols: u16, rows: u16) !void {
+        const fd = try connect(self.client.socket_path, self.io);
+        self.refresh_mutex.lockUncancelable(self.io);
+        if (self.refresh_stopping) {
+            self.refresh_mutex.unlock(self.io);
+            _ = c.close(fd);
+            return error.Canceled;
+        }
+        self.activation_fd = fd;
+        self.refresh_mutex.unlock(self.io);
+        defer {
+            self.refresh_mutex.lockUncancelable(self.io);
+            self.activation_fd = -1;
+            _ = c.close(fd);
+            self.refresh_mutex.unlock(self.io);
+        }
+        var metadata = try self.client.activateRecoveryOnFd(fd, self.id, home, retry, cols, rows);
+        defer metadata.deinit(self.gpa);
+        self.applyMetadata(metadata);
+    }
+
     pub fn applyEvent(self: *Session, flags: protocol.EventFlags) void {
         if (flags.grid or flags.lifecycle) self.grid_dirty.store(true, .release);
         if (flags.metadata or flags.lifecycle) self.metadata_dirty.store(true, .release);
@@ -292,6 +356,7 @@ pub const Session = struct {
     }
 
     pub fn refresh(self: *Session) !void {
+        if (self.recovery_phase.load(.acquire) != .live) return error.SessionDormant;
         // Clear before requesting so an invalidation that races the snapshot
         // remains set instead of being accidentally erased afterward.
         self.grid_dirty.store(false, .release);
@@ -619,10 +684,28 @@ pub const Session = struct {
         return out[0..n];
     }
 
-    fn applyMetadata(self: *Session, metadata: protocol.Metadata) void {
+    pub fn applyMetadata(self: *Session, metadata: protocol.Metadata) void {
         self.exited.store(metadata.exited, .release);
         self.working.store(metadata.working, .release);
         self.attention_pending.store(metadata.attention, .release);
+        // An older list reply must not cancel an activation queued locally.
+        if (!(metadata.phase == .dormant and self.recovery_phase.load(.acquire) == .starting))
+            self.recovery_phase.store(metadata.phase, .release);
+        if (metadata.phase == .live and self.refresh_fn != null) {
+            self.refresh_mutex.lockUncancelable(self.io);
+            defer self.refresh_mutex.unlock(self.io);
+            if (self.refresh_thread == null and !self.refresh_stopping) {
+                self.refresh_thread = std.Thread.spawn(.{}, refreshLoop, .{self}) catch null;
+                self.pending_resize = self.last_resize;
+                self.refresh_requested = true;
+                self.refresh_condition.signal(self.io);
+            }
+        }
+        self.title_mutex.lockUncancelable(self.io);
+        const cwd = metadata.cwd orelse "";
+        self.cwd_len = @min(self.cwd_buf.len, cwd.len);
+        @memcpy(self.cwd_buf[0..self.cwd_len], cwd[0..self.cwd_len]);
+        self.title_mutex.unlock(self.io);
         self.setTitle(metadata.title);
     }
 
@@ -764,6 +847,7 @@ pub const Client = struct {
     event_context: ?*anyopaque = null,
     stopping: std.atomic.Value(bool) = .init(false),
     disconnected: std.atomic.Value(bool) = .init(false),
+    recovery_epoch: std.atomic.Value(u64) = .init(0),
 
     pub fn init(
         gpa: std.mem.Allocator,
@@ -863,6 +947,66 @@ pub const Client = struct {
 
     pub fn supportsPersistentPairZoom(self: *const Client) bool {
         return self.dialect.supportsPersistentPairZoom();
+    }
+
+    pub fn supportsRecovery(self: *const Client) bool {
+        return self.dialect.supportsRecovery();
+    }
+
+    pub fn acceptRecovery(self: *Client, generation: u64) !void {
+        return self.changeRecovery(.recovery_accept, generation);
+    }
+
+    pub fn dismissRecovery(self: *Client, generation: u64) !void {
+        return self.changeRecovery(.recovery_dismiss, generation);
+    }
+
+    fn changeRecovery(self: *Client, tag: protocol.Tag, generation: u64) !void {
+        if (!self.supportsRecovery()) return error.RecoveryUnavailable;
+        var enc = protocol.Encoder.init(self.gpa);
+        defer enc.deinit();
+        try enc.int(u64, generation);
+        const fd = try connect(self.socket_path, self.io);
+        defer _ = c.close(fd);
+        var response = try self.requestOnFd(fd, tag, enc.slice());
+        defer response.deinit(self.gpa);
+        try expectTag(response.tag, .ok);
+    }
+
+    /// Call from a worker. This dedicated lane keeps chdir/consent waits off
+    /// both the interactive command lane and the serialized snapshot lane.
+    pub fn activateRecovery(self: *Client, id: u64, home: bool, retry: bool, cols: u16, rows: u16) !protocol.Metadata {
+        if (!self.supportsRecovery()) return error.RecoveryUnavailable;
+        const fd = try connect(self.socket_path, self.io);
+        defer _ = c.close(fd);
+        return self.activateRecoveryOnFd(fd, id, home, retry, cols, rows);
+    }
+
+    fn activateRecoveryOnFd(self: *Client, fd: c.fd_t, id: u64, home: bool, retry: bool, cols: u16, rows: u16) !protocol.Metadata {
+        if (!self.supportsRecovery()) return error.RecoveryUnavailable;
+        if (self.isDisconnected()) return error.Disconnected;
+        if (self.recovery_epoch.load(.acquire) == 0) {
+            var registry = try self.listRegistry();
+            registry.deinit(self.gpa);
+        }
+        var enc = protocol.Encoder.init(self.gpa);
+        defer enc.deinit();
+        try enc.int(u64, id);
+        try enc.int(u64, self.recovery_epoch.load(.acquire));
+        try enc.boolean(home);
+        try enc.boolean(retry);
+        try enc.int(u16, cols);
+        try enc.int(u16, rows);
+        try selected_protocol.writeFrame(fd, self.dialect, .recovery_activate, enc.slice());
+        var response = try selected_protocol.readFrame(fd, self.dialect, self.gpa);
+        defer response.deinit(self.gpa);
+        if (response.tag == .protocol_error) return error.RemoteError;
+        try expectTag(response.tag, .metadata);
+        var dec: protocol.Decoder = .{ .bytes = response.payload };
+        var metadata = try selected_protocol.decodeMetadata(self.dialect, &dec, self.gpa);
+        errdefer metadata.deinit(self.gpa);
+        try dec.finish();
+        return metadata;
     }
 
     pub fn daemonIdentity(self: *const Client) *const DaemonIdentity {
@@ -1051,7 +1195,14 @@ pub const Client = struct {
         defer response.deinit(self.gpa);
         try expectTag(response.tag, .session_list);
         var dec: protocol.Decoder = .{ .bytes = response.payload };
-        return selected_protocol.decodeRegistry(self.dialect, &dec, self.gpa);
+        var registry = try selected_protocol.decodeRegistry(self.dialect, &dec, self.gpa);
+        errdefer registry.deinit(self.gpa);
+        if (registry.recovery.owner_epoch != 0) {
+            if (self.recovery_epoch.cmpxchgStrong(0, registry.recovery.owner_epoch, .acq_rel, .acquire)) |previous| {
+                if (previous != registry.recovery.owner_epoch) return error.StaleRecoveryEpoch;
+            }
+        }
+        return registry;
     }
 
     pub fn create(self: *Client, cols: u16, rows: u16, cwd: ?[]const u8) !protocol.Metadata {
@@ -1914,9 +2065,8 @@ fn probeDialect(
 }
 
 fn connect(path: []const u8, io: std.Io) !c.fd_t {
-    const address = try std.Io.net.UnixAddress.init(path);
-    const stream = try address.connect(io);
-    return stream.socket.handle;
+    _ = io;
+    return @import("../daemon/unix_connect.zig").connect(path);
 }
 
 fn subscribeEvent(
@@ -1976,92 +2126,62 @@ fn expectTag(actual: protocol.Tag, expected: protocol.Tag) !void {
     if (actual != expected) return error.ProtocolMismatch;
 }
 
-const V13Fixture = struct {
+const RetainedFixture = struct {
     io: std.Io,
     path: []const u8,
+    dialect: u16,
     ready: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
 
-    fn run(self: *V13Fixture) void {
+    fn run(self: *RetainedFixture) void {
         self.runFallible() catch |err| {
             self.failure = err;
         };
         self.ready.store(true, .release);
     }
 
-    fn runFallible(self: *V13Fixture) !void {
+    fn frozen(self: *RetainedFixture, comptime name: []const u8) []const u8 {
+        return if (self.dialect == 19)
+            @embedFile("daemon_protocol/fixtures/v19/" ++ name)
+        else
+            @embedFile("daemon_protocol/fixtures/v18/" ++ name);
+    }
+
+    fn runFallible(self: *RetainedFixture) !void {
         const alloc = std.heap.page_allocator;
         const address = try std.Io.net.UnixAddress.init(self.path);
         var server = try address.listen(self.io, .{});
         defer server.deinit(self.io);
         self.ready.store(true, .release);
-
-        // Pre-BTL1 peer rejects lifecycle, then newer exact probes.
-        var rejected_lifecycle = try server.accept(self.io);
-        rejected_lifecycle.close(self.io);
-        var rejected_current = try server.accept(self.io);
-        rejected_current.close(self.io);
-
-        var rejected_v18 = try server.accept(self.io);
-        rejected_v18.close(self.io);
-
-        // The fourth connection is the selected v13 command lane.
+        var discovery = try server.accept(self.io);
+        var request = try lifecycle.readFrame(discovery.socket.handle, alloc);
+        defer request.deinit(alloc);
+        if (request.tag != .status or request.payload.len != 0) return error.InvalidFixtureRequest;
+        const dialects = [_]u16{self.dialect};
+        const status = try lifecycle.encodeStatus(alloc, .{
+            .product_version = "fixture",
+            .dialects = &dialects,
+            .session_count = 1,
+            .attach_connection_count = 0,
+            .draining = false,
+        });
+        defer alloc.free(status);
+        try lifecycle.writeFrame(discovery.socket.handle, .status_result, status);
+        discovery.close(self.io);
         var command = try server.accept(self.io);
         defer command.close(self.io);
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v13/list-request.hex"),
-        );
-        try sendFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v13/empty-registry-response.hex"),
-        );
-
-        // Client performs one harmless lifecycle discovery after legacy
-        // selection, then opens its refresh lane.
-        var rejected_lifecycle_retry = try server.accept(self.io);
-        rejected_lifecycle_retry.close(self.io);
+        try expectFrozenFrame(command.socket.handle, alloc, self.frozen("list-request.hex"));
+        try sendFrozenFrame(command.socket.handle, alloc, self.frozen("registry-response.hex"));
         var refresh = try server.accept(self.io);
         defer refresh.close(self.io);
-
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v13/list-request.hex"),
-        );
-        try sendFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v13/empty-registry-response.hex"),
-        );
-
-        // Ordinary semantic keys retain the exact public v13 payload.
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v13/up-key-request.hex"),
-        );
-        try protocol.writeFrameVersion(command.socket.handle, 13, .ok, &.{});
-
-        // v15 committed text must cross v13 through its bounded raw-write
-        // command, not the incompatible v15 key-event shape.
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v13/committed-text-request.hex"),
-        );
-        try protocol.writeFrameVersion(command.socket.handle, 13, .ok, &.{});
-
-        // v15 supplies pixels internally but the public v13 request remains
-        // the exact cell-only frame.
-        try expectFrozenFrame(
-            command.socket.handle,
-            alloc,
-            @embedFile("daemon_protocol/fixtures/v13/mouse-request.hex"),
-        );
-        try protocol.writeFrameVersion(command.socket.handle, 13, .bool_result, &.{1});
+        try expectFrozenFrame(command.socket.handle, alloc, self.frozen("list-request.hex"));
+        try sendFrozenFrame(command.socket.handle, alloc, self.frozen("registry-response.hex"));
+        try expectFrozenFrame(command.socket.handle, alloc, self.frozen("up-key-request.hex"));
+        try protocol.writeFrameVersion(command.socket.handle, self.dialect, .ok, &.{});
+        try expectFrozenFrame(command.socket.handle, alloc, self.frozen("committed-text-request.hex"));
+        try protocol.writeFrameVersion(command.socket.handle, self.dialect, .ok, &.{});
+        try expectFrozenFrame(command.socket.handle, alloc, self.frozen("mouse-request.hex"));
+        try protocol.writeFrameVersion(command.socket.handle, self.dialect, .bool_result, &.{1});
     }
 };
 
@@ -2083,7 +2203,7 @@ const UnsupportedLegacyFixture = struct {
         var server = try address.listen(self.io, .{});
         defer server.deinit(self.io);
         self.ready.store(true, .release);
-        // Malformed lifecycle, current, v18, and v13 probes are rejected.
+        // Malformed lifecycle, current, v19, and v18 probes are rejected.
         // Only after every retained dialect fails may startup classify the
         // peer as upgrade-required.
         inline for (0..4) |_| {
@@ -2195,23 +2315,30 @@ test "v18 frozen snapshots translate every released pointer value" {
         error.InvalidBoolean,
         selected_protocol.decodeSnapshot(.current, &current_dec, alloc),
     );
+}
 
-    var v13_text_dec: protocol.Decoder = .{ .bytes = text_frame[12..] };
-    var v13_snapshot = try selected_protocol.decodeSnapshot(.v13, &v13_text_dec, alloc);
-    defer v13_snapshot.deinit(alloc);
-    try v13_text_dec.finish();
-    try std.testing.expectEqual(vt.mouse.PointerShape.text, v13_snapshot.pointer_shape);
-
-    const pointer_frame = try frozenHex(
-        alloc,
-        @embedFile("daemon_protocol/fixtures/v18/minimal-snapshot-pointer-response.hex"),
-    );
-    defer alloc.free(pointer_frame);
-    var v13_dec: protocol.Decoder = .{ .bytes = pointer_frame[12..] };
-    try std.testing.expectError(
-        error.InvalidSnapshot,
-        selected_protocol.decodeSnapshot(.v13, &v13_dec, alloc),
-    );
+test "v19 frozen snapshot and registry remain exact without recovery fields" {
+    const alloc = std.testing.allocator;
+    const frame = try frozenHex(alloc, @embedFile("daemon_protocol/fixtures/v19/minimal-snapshot-text-response.hex"));
+    defer alloc.free(frame);
+    var dec: protocol.Decoder = .{ .bytes = frame[12..] };
+    var snapshot = try selected_protocol.decodeSnapshot(.v19, &dec, alloc);
+    defer snapshot.deinit(alloc);
+    try dec.finish();
+    try std.testing.expectEqualStrings("v19", snapshot.title);
+    try std.testing.expectEqual(vt.mouse.PointerShape.text, snapshot.pointer_shape);
+    frame[53] = 34; // First undefined public v19 pointer value.
+    dec = .{ .bytes = frame[12..] };
+    try std.testing.expectError(error.InvalidSnapshot, selected_protocol.decodeSnapshot(.v19, &dec, alloc));
+    const registry_frame = try frozenHex(alloc, @embedFile("daemon_protocol/fixtures/v19/registry-response.hex"));
+    defer alloc.free(registry_frame);
+    dec = .{ .bytes = registry_frame[12..] };
+    var registry = try selected_protocol.decodeRegistry(.v19, &dec, alloc);
+    defer registry.deinit(alloc);
+    try std.testing.expectEqual(protocol.RecoveryPhase.live, registry.sessions[0].phase);
+    try std.testing.expect(!registry.recovery.available);
+    dec = .{ .bytes = registry_frame[12..] };
+    try std.testing.expectError(error.Truncated, selected_protocol.decodeRegistry(.current, &dec, alloc));
 }
 
 test "resize mailbox retains only the newest unpublished geometry" {
@@ -2296,7 +2423,11 @@ test "malformed peer exhausts exact dialects into typed upgrade result" {
     if (fixture.failure) |err| return err;
 }
 
-test "client negotiates v13 and downgrades committed text" {
+test "client preserves retained public sessions and gates recovery before transmission" {
+    inline for (.{ @as(u16, 19), @as(u16, 18) }) |dialect| try testRetainedDialect(dialect);
+}
+
+fn testRetainedDialect(dialect: u16) !void {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var random_bytes: [8]u8 = undefined;
@@ -2304,7 +2435,7 @@ test "client negotiates v13 and downgrades committed text" {
     var home_buf: [64]u8 = undefined;
     const home = try std.fmt.bufPrint(
         &home_buf,
-        "/tmp/bt-v13-{x}",
+        "/tmp/bt-skew-{x}",
         .{std.mem.readInt(u64, &random_bytes, .little)},
     );
     try std.Io.Dir.createDirAbsolute(io, home, .default_dir);
@@ -2318,18 +2449,25 @@ test "client negotiates v13 and downgrades committed text" {
     const socket_path = try protocol.socketPath(alloc, &env);
     defer alloc.free(socket_path);
 
-    var fixture: V13Fixture = .{ .io = io, .path = socket_path };
-    const thread = try std.Thread.spawn(.{}, V13Fixture.run, .{&fixture});
+    var fixture: RetainedFixture = .{ .io = io, .path = socket_path, .dialect = dialect };
+    const thread = try std.Thread.spawn(.{}, RetainedFixture.run, .{&fixture});
     while (!fixture.ready.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
     if (fixture.failure) |err| return err;
 
     var client = try Client.init(alloc, io, &env);
-    try std.testing.expectEqual(@as(u16, 13), client.attachDialect());
+    try std.testing.expectEqual(dialect, client.attachDialect());
     try std.testing.expect(client.updatePending());
-    try std.testing.expect(!client.daemonIdentity().lifecycle_supported);
+    try std.testing.expect(client.daemonIdentity().lifecycle_supported);
     var registry = try client.listRegistry();
     defer registry.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), registry.sessions.len);
+    try std.testing.expectEqual(@as(usize, 1), registry.sessions.len);
+    try std.testing.expectEqualStrings("survivor", registry.sessions[0].title);
+    try std.testing.expectEqualStrings("/tmp", registry.sessions[0].cwd.?);
+    try std.testing.expect(!registry.recovery.available);
+    try std.testing.expect(!client.supportsRecovery());
+    try std.testing.expectError(error.RecoveryUnavailable, client.acceptRecovery(1));
+    try std.testing.expectError(error.RecoveryUnavailable, client.dismissRecovery(1));
+    try std.testing.expectError(error.RecoveryUnavailable, client.activateRecovery(1, false, false, 80, 24));
     try client.keyEvent(1, .{ .code = .up });
     try client.keyEvent(1, .{ .code = .text, .text = "hello" });
     try std.testing.expect(try client.mouseEvent(1, .{

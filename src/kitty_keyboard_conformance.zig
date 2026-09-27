@@ -224,7 +224,7 @@ fn validateCase(case: Case) !void {
         .dialect, .pty => {
             if (case.matrix != null) return error.InvalidLayerShape;
             const dialect = case.dialect orelse return error.InvalidLayerShape;
-            if (dialect != 19 and dialect != 18 and dialect != 13 and dialect != 10)
+            if (dialect != 20 and dialect != 19 and dialect != 18 and dialect != 13 and dialect != 10)
                 return error.UnsupportedDialect;
             if (case.steps.len == 0 or case.expect.flags != null or
                 case.expect.suppressed or case.expect.pty_hex == null or
@@ -365,10 +365,11 @@ fn runEncoder(alloc: std.mem.Allocator, case: Case) !void {
 }
 
 fn runDialect(alloc: std.mem.Allocator, case: Case, real_pty: bool) !void {
-    const dialect: selected.Dialect = switch (case.dialect.?) {
-        19 => if (protocol.version == 19) .current else return error.CurrentDialectChanged,
+    const dialect: ?selected.Dialect = switch (case.dialect.?) {
+        20 => if (protocol.version == 20) .current else return error.CurrentDialectChanged,
+        19 => .v19,
         18 => .v18,
-        13 => .v13,
+        13 => null, // Historical oracle; not shipped in the viewer.
         else => unreachable,
     };
     const session_id: u64 = 42;
@@ -384,7 +385,10 @@ fn runDialect(alloc: std.mem.Allocator, case: Case, real_pty: bool) !void {
         var semantic = protocol.Encoder.init(alloc);
         defer semantic.deinit();
         try semantic.int(u64, session_id);
-        const classification = try selected.encodeKeyEvent(dialect, &semantic, event);
+        const classification = if (dialect) |selected_dialect|
+            try selected.encodeKeyEvent(selected_dialect, &semantic, event)
+        else
+            try @import("test_support/historical_v13_key.zig").encodeKeyEvent(&semantic, event);
 
         var raw_request = protocol.Encoder.init(alloc);
         defer raw_request.deinit();

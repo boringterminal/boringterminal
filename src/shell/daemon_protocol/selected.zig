@@ -3,13 +3,12 @@
 const std = @import("std");
 const protocol = @import("../../daemon/protocol.zig");
 const vt = @import("../../vt.zig");
-const v13 = @import("compat/v13.zig");
+const v19 = @import("compat/v19.zig");
 const v18 = @import("compat/v18.zig");
-const legacy_metadata = @import("compat/metadata_v10_v13.zig");
 const c = std.c;
 
 pub const Dialect = enum(u16) {
-    v13 = v13.version,
+    v19 = v19.version,
     v18 = v18.version,
     current = protocol.version,
 
@@ -21,6 +20,10 @@ pub const Dialect = enum(u16) {
         return self != .current;
     }
 
+    pub fn supportsRecovery(self: Dialect) bool {
+        return self == .current;
+    }
+
     pub fn supportsSearch(_: Dialect) bool {
         return true;
     }
@@ -30,7 +33,8 @@ pub const Dialect = enum(u16) {
     }
 
     pub fn supportsPersistentPairZoom(self: Dialect) bool {
-        return self == .current or self == .v18;
+        _ = self;
+        return true;
     }
 };
 
@@ -40,7 +44,7 @@ pub const KeyEncoding = union(enum) {
     ignored,
 };
 
-const retained_probe_order = [_]Dialect{ .v18, .v13 };
+const retained_probe_order = [_]Dialect{ .v19, .v18 };
 
 pub fn retainedProbeOrder() []const Dialect {
     return &retained_probe_order;
@@ -66,31 +70,14 @@ pub fn encodeKeyEvent(
     enc: *protocol.Encoder,
     event: vt.keyboard.Event,
 ) !KeyEncoding {
-    switch (dialect) {
-        .current, .v18 => {
-            try protocol.encodeKeyEvent(enc, event);
-            return .{ .semantic = {} };
-        },
-        .v13 => switch (v13.classifyKey(event)) {
-            .semantic => |code| {
-                try v13.encodeSemanticKey(enc, code, event);
-                return .{ .semantic = {} };
-            },
-            .raw => |bytes| return .{ .raw = bytes },
-            .ignored => return .ignored,
-        },
-    }
+    _ = dialect;
+    try protocol.encodeKeyEvent(enc, event);
+    return .{ .semantic = {} };
 }
 
-pub fn encodeMouseEvent(
-    dialect: Dialect,
-    enc: *protocol.Encoder,
-    event: vt.mouse.Event,
-) !void {
-    switch (dialect) {
-        .current, .v18 => try protocol.encodeMouseEvent(enc, event),
-        .v13 => try v13.encodeMouseEvent(enc, event),
-    }
+pub fn encodeMouseEvent(dialect: Dialect, enc: *protocol.Encoder, event: vt.mouse.Event) !void {
+    _ = dialect;
+    try protocol.encodeMouseEvent(enc, event);
 }
 
 pub fn decodeSnapshot(
@@ -101,7 +88,7 @@ pub fn decodeSnapshot(
     return switch (dialect) {
         .current => protocol.Snapshot.decode(dec, alloc),
         .v18 => v18.decodeSnapshot(dec, alloc),
-        .v13 => v18.decodeTextOnlySnapshot(dec, alloc),
+        .v19 => v19.decodeSnapshot(dec, alloc),
     };
 }
 
@@ -111,8 +98,8 @@ pub fn decodeMetadata(
     alloc: std.mem.Allocator,
 ) !protocol.Metadata {
     return switch (dialect) {
-        .current, .v18 => protocol.decodeMetadata(dec, alloc),
-        .v13 => legacy_metadata.decodeMetadata(dec, alloc),
+        .current => protocol.decodeMetadata(dec, alloc),
+        .v18, .v19 => v19.decodeMetadata(dec, alloc),
     };
 }
 
@@ -122,13 +109,13 @@ pub fn decodeRegistry(
     alloc: std.mem.Allocator,
 ) !protocol.RegistrySnapshot {
     return switch (dialect) {
-        .current, .v18 => protocol.decodeRegistry(dec, alloc),
-        .v13 => legacy_metadata.decodeRegistry(dec, alloc),
+        .current => protocol.decodeRegistry(dec, alloc),
+        .v18, .v19 => v19.decodeRegistry(dec, alloc),
     };
 }
 
 test "selected dialect numbers are exact" {
-    try std.testing.expectEqual(@as(u16, 13), Dialect.v13.number());
+    try std.testing.expectEqual(@as(u16, 19), Dialect.v19.number());
     try std.testing.expectEqual(@as(u16, 18), Dialect.v18.number());
     try std.testing.expectEqual(protocol.version, Dialect.current.number());
 }
@@ -136,13 +123,13 @@ test "selected dialect numbers are exact" {
 test "selection prefers the newest common dialect" {
     try std.testing.expectEqual(Dialect.current, bestSupported(&.{ 18, protocol.version }).?);
     try std.testing.expectEqual(Dialect.v18, bestSupported(&.{18}).?);
-    try std.testing.expectEqual(Dialect.v13, bestSupported(&.{13}).?);
+    try std.testing.expectEqual(Dialect.v19, bestSupported(&.{19}).?);
     try std.testing.expect(bestSupported(&.{10}) == null);
     try std.testing.expect(bestSupported(&.{12}) == null);
 }
 
-test "persistent pair zoom is current-dialect only" {
+test "persistent pair zoom is available in all retained dialects" {
     try std.testing.expect(Dialect.current.supportsPersistentPairZoom());
     try std.testing.expect(Dialect.v18.supportsPersistentPairZoom());
-    try std.testing.expect(!Dialect.v13.supportsPersistentPairZoom());
+    try std.testing.expect(Dialect.v19.supportsPersistentPairZoom());
 }

@@ -52,7 +52,7 @@ Unix-domain `SOCK_STREAM` socket. Every frame begins with:
 
 ```
 u32 magic       // "BTD1"
-u16 version     // 19
+u16 version     // 20
 u16 message tag
 u32 payload length
 ```
@@ -533,6 +533,43 @@ only if version 19 ships publicly.
 
 No persistence across daemon restart or reboot is promised because the PTYs
 cannot survive either event.
+
+## Dialect 20: recovery entries (RFC 0025)
+
+This is an exact-schema change. A metadata record appends one `u8` phase:
+0 live, 1 dormant, 2 starting, 3 cwd unavailable, 4 cwd denied, 5 spawn failed.
+A dormant record has no PTY or VT snapshot. Its local cwd/title are metadata;
+enumerating or accepting it never opens that directory.
+
+A registry response appends `bool recovery_available`, `bool recovery_failed`,
+`u64 owner_epoch`, `u64 pending_generation`, `u32 pending_count` (at most 1024), and
+`u64 selected_session_id` (zero means none). A nonzero count requires available
+recovery and a nonzero generation. A selected ID must belong to the registry.
+
+Requests 35/36 accept/dismiss carry only `u64 pending_generation` and return
+`ok` after a durable barrier. Repeating the current consumed token is a no-op;
+a stale token is rejected. Acceptance appends fresh runtime IDs and dormant
+layout to existing sessions. Request 37 activates a record and carries
+`u64 id`, `u64 owner_epoch`, `bool home`, `bool retry`, `u16 cols`, `u16 rows`. Its reply is metadata,
+including a typed phase after cwd/spawn failure. An already-live ID is returned
+without another spawn. Only explicit retry/home can reactivate a failed entry.
+The viewer pins the epoch from its original registry connection. A separate
+activation connection with a different epoch is rejected before spawning;
+reusing a socket path after daemon loss cannot redirect an old runtime ID.
+Activation uses a dedicated worker connection so a filesystem-consent wait
+does not occupy the viewer's input/snapshot lanes.
+
+Lifecycle session counts include dormant entries. Pending unaccepted offers
+alone do not prevent idle replacement. A close persistence failure keeps the
+session registered and returns `protocol_error`; destructive drain must not
+acknowledge success after a failed removal barrier. An unreadable/future
+checkpoint leaves ordinary terminal use available and reports recovery
+unavailable instead of overwriting that source.
+
+The next-release viewer retains dialects 19 and 18. Their frozen codecs set
+phase to live and recovery availability to false because those daemons cannot
+hold dormant entries. No recovery request is sent to either retained dialect.
+The daemon continues to link only the current codec.
 
 ## Rejected alternatives
 

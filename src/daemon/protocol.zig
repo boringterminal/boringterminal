@@ -7,7 +7,7 @@ const graphics_limits = @import("../graphics_limits.zig");
 const display_registry = @import("display_registry.zig");
 const c = std.c;
 
-pub const version: u16 = 19;
+pub const version: u16 = 20;
 pub const max_payload: usize = 128 * 1024 * 1024;
 pub const max_working_directory_bytes: usize = 1024;
 const magic = "BTD1";
@@ -48,6 +48,9 @@ pub const Tag = enum(u16) {
     search = 32,
     create_beside = 33,
     display_zoom = 34,
+    recovery_accept = 35,
+    recovery_dismiss = 36,
+    recovery_activate = 37,
 
     ok = 64,
     protocol_error = 65,
@@ -81,6 +84,8 @@ pub const FocusedMember = display_registry.FocusedMember;
 pub const RegistrySnapshot = struct {
     sessions: []Metadata,
     display_items: []DisplayItem,
+    recovery: RecoveryStatus = .{},
+    selected: ?u64 = null,
 
     pub fn deinit(self: *RegistrySnapshot, alloc: std.mem.Allocator) void {
         for (self.sessions) |*metadata| metadata.deinit(alloc);
@@ -97,6 +102,7 @@ pub const Metadata = struct {
     working: bool,
     attention: bool,
     cwd: ?[]u8 = null,
+    phase: RecoveryPhase = .live,
 
     pub fn deinit(self: *Metadata, alloc: std.mem.Allocator) void {
         alloc.free(self.title);
@@ -104,6 +110,25 @@ pub const Metadata = struct {
         self.* = undefined;
     }
 };
+
+pub const RecoveryPhase = enum(u8) { live, dormant, starting, cwd_unavailable, cwd_denied, spawn_failed };
+
+pub const RecoveryStatus = struct {
+    available: bool = false,
+    failed: bool = false,
+    owner_epoch: u64 = 0,
+    generation: u64 = 0,
+    pending_count: u32 = 0,
+};
+
+pub fn encodeRecoveryStatus(enc: *Encoder, status: RecoveryStatus, selected: ?u64) !void {
+    try enc.boolean(status.available);
+    try enc.boolean(status.failed);
+    try enc.int(u64, status.owner_epoch);
+    try enc.int(u64, status.generation);
+    try enc.int(u32, status.pending_count);
+    try enc.int(u64, selected orelse 0);
+}
 
 pub const CreateRequest = struct {
     cols: u16,
@@ -1099,6 +1124,7 @@ pub fn encodeMetadata(enc: *Encoder, metadata: Metadata) !void {
         if (!validWorkingDirectory(cwd)) return error.InvalidWorkingDirectory;
         try enc.bytes(cwd);
     }
+    try enc.byte(@intFromEnum(metadata.phase));
 }
 
 pub fn decodeMetadata(dec: *Decoder, alloc: std.mem.Allocator) !Metadata {
@@ -1114,14 +1140,9 @@ pub fn decodeMetadata(dec: *Decoder, alloc: std.mem.Allocator) !Metadata {
         if (!validWorkingDirectory(path)) return error.InvalidWorkingDirectory;
         break :blk path;
     } else null;
-    return .{
-        .id = id,
-        .title = title,
-        .exited = exited,
-        .working = working,
-        .attention = attention,
-        .cwd = cwd,
-    };
+    errdefer if (cwd) |path| alloc.free(path);
+    const phase = std.enums.fromInt(RecoveryPhase, try dec.byte()) orelse return error.InvalidRecoveryPhase;
+    return .{ .id = id, .title = title, .exited = exited, .working = working, .attention = attention, .cwd = cwd, .phase = phase };
 }
 
 fn validWorkingDirectory(path: []const u8) bool {
@@ -1181,6 +1202,7 @@ pub fn encodeRegistry(enc: *Encoder, sessions: []const Metadata, items: []const 
     for (sessions) |metadata| try encodeMetadata(enc, metadata);
     try enc.int(u32, @intCast(items.len));
     for (items) |item| try encodeDisplayItem(enc, item);
+    try encodeRecoveryStatus(enc, .{}, null);
 }
 
 pub fn decodeRegistry(dec: *Decoder, alloc: std.mem.Allocator) !RegistrySnapshot {
@@ -1199,6 +1221,16 @@ pub fn decodeRegistry(dec: *Decoder, alloc: std.mem.Allocator) !RegistrySnapshot
     const items = try alloc.alloc(DisplayItem, item_count);
     errdefer alloc.free(items);
     for (items) |*item| item.* = try decodeDisplayItem(dec);
+    const recovery_status: RecoveryStatus = .{
+        .available = try dec.boolean(),
+        .failed = try dec.boolean(),
+        .owner_epoch = try dec.int(u64),
+        .generation = try dec.int(u64),
+        .pending_count = try dec.int(u32),
+    };
+    if ((recovery_status.available and recovery_status.owner_epoch == 0) or recovery_status.pending_count > 1024 or (recovery_status.pending_count != 0 and
+        (!recovery_status.available or recovery_status.generation == 0))) return error.InvalidRegistry;
+    const selected = try dec.int(u64);
     try dec.finish();
 
     var known = std.AutoHashMap(u64, void).init(alloc);
@@ -1217,7 +1249,8 @@ pub fn decodeRegistry(dec: *Decoder, alloc: std.mem.Allocator) !RegistrySnapshot
         },
     };
     if (membership.count() != known.count()) return error.InvalidRegistry;
-    return .{ .sessions = sessions, .display_items = items };
+    if (selected != 0 and !known.contains(selected)) return error.InvalidRegistry;
+    return .{ .sessions = sessions, .display_items = items, .recovery = recovery_status, .selected = if (selected != 0) selected else null };
 }
 
 fn validateMembership(
@@ -1534,6 +1567,7 @@ test "display registry codec preserves bounded pairs and rejects duplicate membe
         .focused = .left,
         .ratio = display_registry.default_ratio,
     } });
+    try encodeRecoveryStatus(&invalid, .{}, null);
     var invalid_dec: Decoder = .{ .bytes = invalid.slice() };
     try std.testing.expectError(error.InvalidRegistry, decodeRegistry(&invalid_dec, alloc));
 }

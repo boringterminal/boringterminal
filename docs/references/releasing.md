@@ -18,11 +18,37 @@ Artifacts land in `zig-out/release/`:
 - the matching `.sha256` file
 
 The script builds both architectures with `ReleaseSafe`, merges the app and
-daemon executables with `lipo`, explicitly ad-hoc signs the daemon, GUI, and
+daemon executables with `lipo`, signs the daemon, GUI, and
 enclosing app in leaf-first order, verifies the signature and architecture
 slices, and creates the DMG with the MIT license and an Applications shortcut.
-The per-architecture Zig build uses the same serial signing order. The script
+The default remains ad-hoc. The per-architecture Zig build and final package
+use the same `scripts/sign-macos.sh` signer and serial order. The script
 uses a private `mktemp` staging directory and removes it on exit.
+
+### Certificate signing and privacy identity
+
+When a certificate and private key are available in the build keychain:
+
+```sh
+zig build app -Dcodesign-identity='Apple Development: Your Name (TEAMID)'
+BORINGTERMINAL_SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+  ./scripts/package-macos.sh
+```
+
+Use the same signing identity across successive builds under test. These are
+separate development/distribution examples, not a claim that their default
+designated requirements are interchangeable. The packager signs the final
+universal binaries after `lipo`; architecture staging builds can remain ad-hoc.
+An empty or unusable requested identity fails instead of falling back to `-`.
+This does not notarize the result or grant filesystem permissions. Do not
+publish a certificate-signed artifact using the current ad-hoc release notice
+without updating the workflow's signing configuration and accurate notice.
+
+Ad-hoc builds do not supply a stable identity for macOS privacy authorization
+across changed builds. Test TCC using a certificate-signed app launched from
+Finder/LaunchServices in a fresh test account/VM; direct `zig build run` may
+attribute access to the launching terminal. Also test after viewer exit while
+the helper survives. Follow [RCA 0002](../rcas/0002-filesystem-permission-prompts.md).
 
 ## GitHub release
 
@@ -36,6 +62,7 @@ Increment the numeric `CFBundleVersion` for every published build. Then run:
 
 ```sh
 zig build test -Dportable-system-goldens=true
+/bin/bash scripts/test-macos-signing.sh
 zig build esctest
 git tag -a vX.Y.Z -m "Boring Terminal X.Y.Z"
 git push origin vX.Y.Z
@@ -50,6 +77,8 @@ suite with exact font and glyph-containing Metal hashes.
 tests, runs the same packager, and creates or updates the GitHub release using
 the repository-scoped `GITHUB_TOKEN`. New releases prepend the Gatekeeper
 notice below to their generated notes. No signing secrets are required.
+When `docs/releases/<tag>.md` exists, the workflow includes those reviewed
+user-facing notes after the signing notice and before generated commit notes.
 
 ## Gatekeeper
 

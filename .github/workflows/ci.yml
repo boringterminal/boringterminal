@@ -32,8 +32,12 @@ jobs:
         with:
           version: 0.16.0
 
+      - name: Check macOS signing policy
+        run: /bin/bash scripts/test-macos-signing.sh
+
       - name: Run unit and integration tests
-        run: zig build test -Dportable-system-goldens=true
+        # Keep compatibility codecs out of the persistent daemon.
+        run: python3 scripts/check-daemon-imports.py && zig build test -Dportable-system-goldens=true
 
       - name: Run Kitty keyboard conformance ratchet
         run: zig build kitty-keyboard-conformance

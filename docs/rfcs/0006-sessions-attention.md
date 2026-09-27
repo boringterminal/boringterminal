@@ -7,6 +7,13 @@ the credibility work (RFC 0002/0003) is expensive.
 
 ## Sessions and the sidebar
 
+Titlebar session controls use an AppKit titlebar accessory, whose space is
+reserved by the window. Never insert controls at guessed coordinates beside
+the traffic lights: macOS title placement varies and can overlap those controls.
+Recovery chrome contributes to the window's minimum content height: reserve the
+banner plus the terminal minimum, and at least 136 points for a visible recovery
+pane so its stacked buttons remain reachable in a narrow window.
+
 - One vertical sidebar on the left, hidden or shown with ⌘B. No horizontal
   tabs or general pane tree: this is navigation, not a layout system. RFC 0014
   defines the sole exception, a non-nesting two-session side-by-side pair that
@@ -197,8 +204,9 @@ boundary that makes it possible is drawn in milestone 1 (RFC 0005).
   selection commands operate remotely. Version 1 may resend all visible rows
   after a coalesced invalidation, then narrow that same encoding to dirty rows.
   Replaying an unbounded byte stream on attach is rejected.
-- Session persistence across daemon restart or reboot is out of scope: a PTY
-  cannot survive its kernel process.
+- Process persistence across daemon restart or reboot is out of scope: a PTY
+  cannot survive its kernel process. RFC 0025 adds metadata-only workspace
+  recovery into fresh shells after explicit user acceptance.
 - The first daemon session starts in the viewer's inherited process working
   directory when launched from a terminal. LaunchServices' synthetic `/` is
   treated as "no cwd" and falls back to `$HOME`. ⌘T inherits the focused

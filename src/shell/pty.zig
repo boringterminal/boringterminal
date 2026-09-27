@@ -63,6 +63,8 @@ pub const SpawnOptions = struct {
     /// Best-effort initial cwd. If it disappears between lookup and fork,
     /// the child keeps the daemon's `$HOME` cwd.
     cwd: ?[]const u8 = null,
+    /// Recovery must report a failed chdir instead of silently starting in home.
+    strict_cwd: bool = false,
     cols: u16 = 80,
     rows: u16 = 24,
 };
@@ -126,19 +128,65 @@ pub const Pty = struct {
         const ws: c.winsize = .{ .row = opts.rows, .col = opts.cols, .xpixel = 0, .ypixel = 0 };
         if (openpty(&master, &slave, null, null, &ws) != 0) return error.OpenPtyFailed;
         errdefer _ = c.close(master);
+        var slave_owned = true;
+        defer {
+            if (slave_owned) _ = c.close(slave);
+        }
+        // Do not let another session's exec retain either side of this PTY.
+        if (c.fcntl(master, c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) < 0 or
+            c.fcntl(slave, c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) < 0)
+            return error.FcntlFailed;
+
+        var status_pipe: [2]c.fd_t = undefined;
+        if (c.pipe(&status_pipe) != 0) return error.SpawnStatusFailed;
+        defer _ = c.close(status_pipe[0]);
+        var writer_owned = true;
+        defer {
+            if (writer_owned) _ = c.close(status_pipe[1]);
+        }
+        if (c.fcntl(status_pipe[0], c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) < 0 or
+            c.fcntl(status_pipe[1], c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) < 0)
+            return error.SpawnStatusFailed;
 
         const pid = c.fork();
         if (pid < 0) return error.ForkFailed;
         if (pid == 0) {
             // Child. login_tty does setsid + TIOCSCTTY + stdio dup + close.
             _ = c.close(master);
-            if (login_tty(slave) != 0) c._exit(127);
-            if (cwd_z) |path| _ = c.chdir(path.ptr);
+            _ = c.close(status_pipe[0]);
+            if (login_tty(slave) != 0) spawnFailed(status_pipe[1], 1);
+            if (cwd_z) |path| {
+                if (c.chdir(path.ptr) != 0 and opts.strict_cwd) {
+                    const denied = c.errno(-1) == .ACCES or c.errno(-1) == .PERM;
+                    spawnFailed(status_pipe[1], if (denied) 2 else 3);
+                }
+            }
             _ = c.execve(exe_path.ptr, argv_null.ptr, envp.slice.ptr);
-            c._exit(127);
+            spawnFailed(status_pipe[1], 4);
         }
 
         _ = c.close(slave);
+        slave_owned = false;
+        _ = c.close(status_pipe[1]);
+        writer_owned = false;
+        var status: [1]u8 = undefined;
+        while (true) {
+            const n = c.read(status_pipe[0], &status, 1);
+            if (n < 0 and c.errno(n) == .INTR) continue;
+            if (n == 0) break; // exec closed the writer; the shell is running.
+            if (n < 0) _ = c.kill(pid, c.SIG.KILL);
+            var wait_status: c_int = undefined;
+            while (c.waitpid(pid, &wait_status, 0) < 0) {
+                if (c.errno(-1) != .INTR) break;
+            }
+            if (n < 0) return error.SpawnStatusFailed;
+            return switch (status[0]) {
+                1 => error.LoginTtyFailed,
+                2 => error.WorkingDirectoryDenied,
+                3 => error.WorkingDirectoryUnavailable,
+                else => error.ExecFailed,
+            };
+        }
         return .{ .master = master, .child = pid };
     }
 
@@ -280,6 +328,32 @@ pub const Pty = struct {
     }
 };
 
+/// Only async-signal-safe syscalls after fork. No allocator or logging here.
+fn spawnFailed(fd: c.fd_t, code: u8) noreturn {
+    const message = [1]u8{code};
+    while (c.write(fd, &message, 1) < 0) {
+        if (c.errno(-1) != .INTR) break;
+    }
+    c._exit(127);
+}
+
+test "PTY spawn reports cwd and exec errors without starting a fallback shell" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.WorkingDirectoryUnavailable, Pty.spawn(alloc, .{
+        .argv = &.{ "/bin/sh", "-c", "exit 99" },
+        .cwd = "/definitely/not/a/boringterminal/directory",
+        .strict_cwd = true,
+    }));
+    try std.testing.expectError(error.WorkingDirectoryUnavailable, Pty.spawn(alloc, .{
+        .argv = &.{ "/bin/sh", "-c", "exit 99" },
+        .cwd = "/bin/sh",
+        .strict_cwd = true,
+    }));
+    try std.testing.expectError(error.ExecFailed, Pty.spawn(alloc, .{
+        .argv = &.{"/definitely/not/a/boringterminal/shell"},
+    }));
+}
+
 /// macOS has no `C.UTF-8` locale even though Linux development tools commonly
 /// export it. libc silently collapses that alias to `C`, which makes shells
 /// treat valid pasted UTF-8 as separate meta bytes. Correct only those known
@@ -420,7 +494,7 @@ test "pty end to end: spawn, env, read, reap" {
         try out.appendSlice(alloc, buf[0..n]);
     }
     pty.wait();
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "ok:xterm-256color:boringterminal:0.6.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "ok:xterm-256color:boringterminal:0.7.0") != null);
 }
 
 test "pty feeds terminal" {

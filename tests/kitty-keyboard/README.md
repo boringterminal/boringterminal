@@ -19,12 +19,16 @@ unsupported dialect aliases. It exercises production APIs at five boundaries:
 
 - `negotiation`: bytes through `vt.feed()`, with exact flags/replies;
 - `encoder`: `vt.keyboard.encode()`, with exact child-visible bytes;
-- `dialect`: selected v19/v18/v13 request encoding plus child-visible
+- `dialect`: selected v20/v19/v18 request encoding plus child-visible
   semantic/raw behavior;
 - `matrix`: every flag combination, every modifier combination, every
   macOS-reachable physical/functional key and action, the legacy ASCII control
   table, and current-codec acceptance/rejection boundaries; and
-- `pty`: selected-dialect output through a real raw PTY for v19, v18, and v13.
+- `pty`: selected-dialect output through a real raw PTY for v20, v19, and v18.
+
+The historical v13 cases remain unchanged and run against a test-only frozen
+oracle in `src/test_support/historical_v13_key.zig`. Retiring that production
+capsule does not remove its regression cases or permit v13 viewer attachment.
 
 The 606-entry ratchet counts matrix members independently. Adding a native key
 code, protocol flag, action, modifier, or accepted codec shape without a stable

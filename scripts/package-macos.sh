@@ -50,6 +50,14 @@ if $check_only; then
     exit 0
 fi
 
+# Unset preserves credential-free development/CI. Explicitly empty is a
+# configuration error, not permission to silently produce an ad-hoc artifact.
+signing_identity="${BORINGTERMINAL_SIGNING_IDENTITY--}"
+if [[ -z "$signing_identity" ]]; then
+    echo "error: BORINGTERMINAL_SIGNING_IDENTITY is empty; use '-' for ad-hoc signing" >&2
+    exit 1
+fi
+
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/boringterminal-release.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
@@ -88,12 +96,9 @@ for executable in boringterminal boringterminald; do
         echo "error: $executable is not universal: $slices" >&2
         exit 1
     }
-    codesign --force --sign - --timestamp=none \
-        "$stage_dir/$app_name/Contents/MacOS/$executable"
 done
 
-codesign --force --sign - --timestamp=none "$stage_dir/$app_name"
-codesign --verify --deep --strict --verbose=2 "$stage_dir/$app_name"
+/bin/bash "$repo_root/scripts/sign-macos.sh" "$stage_dir/$app_name" "$signing_identity"
 
 /usr/bin/ditto "$stage_dir/$app_name" "$dmg_source/$app_name"
 /usr/bin/ditto "$repo_root/LICENSE" "$dmg_source/LICENSE"

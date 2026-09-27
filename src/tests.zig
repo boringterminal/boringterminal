@@ -21,9 +21,11 @@ test {
     _ = @import("shell/config_watcher.zig");
     _ = @import("daemon/protocol.zig");
     _ = @import("daemon/display_registry.zig");
+    _ = @import("daemon/recovery.zig");
+    _ = @import("daemon/recovery_store.zig");
     _ = @import("daemon/integration_tests.zig");
     _ = @import("shell/daemon_client.zig");
-    _ = @import("shell/daemon_protocol/compat/metadata_v10_v13.zig");
+    _ = @import("shell/daemon_protocol/compat/v19.zig");
     _ = @import("shell/daemon_protocol/compat/v18.zig");
     _ = @import("render/box_drawing.zig");
     _ = @import("render/font.zig");

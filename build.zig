@@ -3,6 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const codesign_identity = b.option(
+        []const u8,
+        "codesign-identity",
+        "Certificate identity for the app and daemon ('-' for ad-hoc development)",
+    ) orelse "-";
     const portable_system_goldens = b.option(
         bool,
         "portable-system-goldens",
@@ -23,6 +28,9 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("DisplayWidth", display_width);
     exe_mod.addImport("Graphemes", graphemes);
     exe_mod.addImport("CaselessMatch", caseless_match);
+    const app_options = b.addOptions();
+    app_options.addOption(bool, "recovery_ui_smoke", b.option(bool, "recovery-ui-smoke", "Run the isolated native recovery smoke harness (test builds only)") orelse false);
+    exe_mod.addOptions("app_options", app_options);
     linkMacFrameworks(exe_mod);
     const exe = b.addExecutable(.{ .name = "boringterminal", .root_module = exe_mod });
 
@@ -76,41 +84,14 @@ pub fn build(b: *std.Build) void {
     const install_icon = b.addInstallFile(app_icon, app_resources ++ "/AppIcon.icns");
 
     const app_path = b.getInstallPath(.prefix, app_name);
-    const codesign_exe = b.addSystemCommand(&.{
-        "/usr/bin/codesign",
-        "--force",
-        "--sign",
-        "-",
-        "--timestamp=none",
-        b.getInstallPath(.prefix, app_executable),
-    });
-    codesign_exe.setName("ad-hoc sign boringterminal");
-    codesign_exe.step.dependOn(&install_exe.step);
-    const codesign_daemon = b.addSystemCommand(&.{
-        "/usr/bin/codesign",
-        "--force",
-        "--sign",
-        "-",
-        "--timestamp=none",
-        b.getInstallPath(.prefix, daemon_executable),
-    });
-    codesign_daemon.setName("ad-hoc sign boringterminald");
-    codesign_daemon.step.dependOn(&install_daemon.step);
-    // Both binaries live in one bundle. codesign may inspect sibling nested
-    // code while signing the GUI path, so signing them concurrently is a
-    // race: the GUI command can observe an as-yet unsigned daemon.
-    codesign_exe.step.dependOn(&codesign_daemon.step);
-    const codesign = b.addSystemCommand(&.{
-        "/usr/bin/codesign",
-        "--force",
-        "--sign",
-        "-",
-        "--timestamp=none",
-        app_path,
-    });
-    codesign.setName("ad-hoc sign Boring Terminal.app");
-    codesign.step.dependOn(&codesign_exe.step);
-    codesign.step.dependOn(&codesign_daemon.step);
+    // The shared signer serializes daemon -> GUI -> bundle, including after
+    // lipo in the release packager. Never replace a requested identity with '-'.
+    const codesign = b.addSystemCommand(&.{"/bin/bash"});
+    codesign.addFileArg(b.path("scripts/sign-macos.sh"));
+    codesign.addArgs(&.{ app_path, codesign_identity });
+    codesign.setName("sign Boring Terminal.app");
+    codesign.step.dependOn(&install_exe.step);
+    codesign.step.dependOn(&install_daemon.step);
     codesign.step.dependOn(&install_plist.step);
     codesign.step.dependOn(&install_icon.step);
     b.getInstallStep().dependOn(&codesign.step);
@@ -147,6 +128,18 @@ pub fn build(b: *std.Build) void {
     linkMacFrameworks(test_mod);
     const test_options = b.addOptions();
     test_options.addOptionPath("daemon_path", daemon_exe.getEmittedBin());
+    const recovery_test_daemon_mod = b.createModule(.{
+        .root_source_file = b.path("src/recovery_test_daemon.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    recovery_test_daemon_mod.addImport("DisplayWidth", display_width);
+    recovery_test_daemon_mod.addImport("Graphemes", graphemes);
+    recovery_test_daemon_mod.addImport("CaselessMatch", caseless_match);
+    linkImageFrameworks(recovery_test_daemon_mod);
+    const recovery_test_daemon = b.addExecutable(.{ .name = "recovery-test-daemon", .root_module = recovery_test_daemon_mod });
+    test_options.addOptionPath("recovery_test_daemon_path", recovery_test_daemon.getEmittedBin());
     test_options.addOption(bool, "portable_system_goldens", portable_system_goldens);
     test_mod.addImport("test_options", test_options.createModule());
     const unit_tests = b.addTest(.{ .root_module = test_mod });

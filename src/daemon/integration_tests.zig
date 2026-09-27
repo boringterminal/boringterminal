@@ -6,11 +6,694 @@ const session_mod = @import("../shell/session.zig");
 const vt = @import("../vt.zig");
 const test_options = @import("test_options");
 const c = std.c;
+const recovery = @import("recovery.zig");
 
 const EventState = struct {
     invalidations: std.atomic.Value(usize) = .init(0),
     events: std.atomic.Value(usize) = .init(0),
 };
+
+const RecoveryFixture = struct {
+    env: std.process.Environ.Map,
+    home: []u8,
+    child: ?std.process.Child = null,
+
+    fn init() !RecoveryFixture {
+        const alloc = std.testing.allocator;
+        const io = std.testing.io;
+        var nonce: [8]u8 = undefined;
+        io.random(&nonce);
+        const home = try std.fmt.allocPrint(alloc, "/tmp/btr-{x}", .{std.mem.readInt(u64, &nonce, .little)});
+        errdefer alloc.free(home);
+        try std.Io.Dir.createDirAbsolute(io, home, .default_dir);
+        errdefer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+        var env = try std.process.Environ.createMap(std.testing.environ, alloc);
+        errdefer env.deinit();
+        try env.put("HOME", home);
+        try env.put("ZDOTDIR", home);
+        try env.put("TMPDIR", home);
+        return .{ .env = env, .home = home };
+    }
+
+    fn start(self: *RecoveryFixture) !void {
+        return self.startExecutable(test_options.daemon_path);
+    }
+
+    fn startExecutable(self: *RecoveryFixture, executable: []const u8) !void {
+        self.child = try std.process.spawn(std.testing.io, .{
+            .argv = &.{executable},
+            .environ_map = &self.env,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+            .pgid = 0,
+        });
+        const path = try protocol.socketPath(std.testing.allocator, &self.env);
+        defer std.testing.allocator.free(path);
+        for (0..200) |_| {
+            if (@import("unix_connect.zig").connect(path)) |fd| {
+                _ = c.close(fd);
+                return;
+            } else |_| try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+        }
+        return error.DaemonStartTimeout;
+    }
+
+    fn stop(self: *RecoveryFixture) void {
+        if (self.child) |*child| child.kill(std.testing.io);
+        self.child = null;
+    }
+
+    fn deinit(self: *RecoveryFixture) void {
+        self.stop();
+        self.env.deinit();
+        std.Io.Dir.cwd().deleteTree(std.testing.io, self.home) catch {};
+        std.testing.allocator.free(self.home);
+    }
+
+    fn checkpoint(self: *RecoveryFixture, current: usize, pending: usize) !recovery.Document {
+        const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/Library/Application Support/boringterminal/recovery.json", .{self.home});
+        defer std.testing.allocator.free(path);
+        for (0..200) |_| {
+            const bytes = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(recovery.max_file_bytes)) catch {
+                try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+                continue;
+            };
+            defer std.testing.allocator.free(bytes);
+            var doc = try recovery.Document.decode(std.testing.allocator, bytes);
+            if (doc.state.current.entries.len == current and doc.state.pending.entries.len == pending) return doc;
+            doc.deinit();
+            try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+        }
+        return error.CheckpointTimeout;
+    }
+};
+
+test "SIGKILL at each primary and backup publication boundary leaves a complete generation" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]bool{ false, true }) |scrub| {
+        for ([_][]const u8{ "recovery.json", "recovery.previous.json" }) |target| {
+            for ([_][]const u8{ "before_write", "after_partial_write", "after_write", "after_file_sync", "after_rename" }) |point| {
+                var fixture = try RecoveryFixture.init();
+                defer fixture.deinit();
+                const home_z = try alloc.dupeZ(u8, fixture.home);
+                defer alloc.free(home_z);
+                try std.testing.expectEqual(@as(c_int, 0), c.chmod(home_z, 0o700));
+                try fixture.env.put("BT_TEST_STORE_KILL_POINT", point);
+                try fixture.env.put("BT_TEST_STORE_KILL_TARGET", target);
+                if (scrub) try fixture.env.put("BT_TEST_STORE_SCRUB", "1");
+                var child = try std.process.spawn(io, .{
+                    .argv = &.{test_options.recovery_test_daemon_path},
+                    .environ_map = &fixture.env,
+                    .stdin = .ignore,
+                    .stdout = .ignore,
+                    .stderr = .ignore,
+                });
+                const term = try child.wait(io);
+                try std.testing.expectEqual(std.process.Child.Term{ .signal = .KILL }, term);
+                // Reopening must obtain the released writer lock, ignore any
+                // half-written temporary, and load the authoritative primary.
+                var store = try @import("recovery_store.zig").Store.open(alloc, io, fixture.home);
+                defer store.deinit();
+                try store.load();
+                const primary_published = if (std.mem.eql(u8, target, "recovery.json"))
+                    std.mem.eql(u8, point, "after_rename")
+                else
+                    scrub;
+                try std.testing.expectEqual(@as(usize, if (primary_published) 0 else 2), store.document.state.current.entries.len);
+                try store.document.state.validate();
+                if (!primary_published) {
+                    try std.testing.expectEqual(@as(u64, 1), store.document.state.current.items[0].left);
+                    try std.testing.expectEqual(@as(?u64, 2), store.document.state.current.items[0].right);
+                    try std.testing.expect(store.document.state.current.items[0].zoomed);
+                }
+                var directory = try std.Io.Dir.openDirAbsolute(io, fixture.home, .{});
+                defer directory.close(io);
+                if (!std.mem.eql(u8, point, "after_rename"))
+                    try directory.access(io, ".recovery-write.tmp", .{});
+                // A successful durable clear consumes the abandoned temporary
+                // and both old metadata generations, even after a partial write.
+                try store.commit(.{}, true);
+                try std.testing.expectError(error.FileNotFound, directory.access(io, ".recovery-write.tmp", .{}));
+                try store.load();
+                try std.testing.expectEqual(@as(usize, 0), store.document.state.current.entries.len);
+            }
+        }
+    }
+}
+
+test "daemon checkpoints pairs while detached and preserves unresolved work across repeated loss" {
+    const alloc = std.testing.allocator;
+    var fixture = try RecoveryFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    var client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var first = try client.create(80, 24, "/tmp");
+    defer first.deinit(alloc);
+    var second = try client.createBeside(first.id, 40, 24, "/tmp");
+    defer second.deinit(alloc);
+    try client.setFocus(second.id, true);
+    // Detaching must not erase the saved selection or pair.
+    client.deinit();
+    var before = try fixture.checkpoint(2, 0);
+    defer before.deinit();
+    try std.testing.expect(before.state.current.items[0].right != null);
+    try std.testing.expect(before.state.current.selected != null);
+    const first_saved_id = before.state.current.entries[0].id;
+    fixture.stop();
+
+    try fixture.start();
+    var after = try fixture.checkpoint(0, 2);
+    defer after.deinit();
+    try std.testing.expectEqual(first_saved_id, after.state.pending.entries[0].id);
+    var fresh_client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var fresh = try fresh_client.create(80, 24, "/tmp");
+    defer fresh.deinit(alloc);
+    fresh_client.deinit();
+    var combined = try fixture.checkpoint(1, 2);
+    combined.deinit();
+    fixture.stop();
+    try fixture.start();
+    var repeated = try fixture.checkpoint(0, 3);
+    defer repeated.deinit();
+    try std.testing.expectEqual(first_saved_id, repeated.state.pending.entries[0].id);
+    try std.testing.expect(repeated.state.pending.items[0].right != null);
+}
+
+test "recovery retains reordered swapped pair ratio zoom and focus across daemon loss" {
+    const alloc = std.testing.allocator;
+    var fixture = try RecoveryFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    var client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var first = try client.create(80, 24, fixture.home);
+    defer first.deinit(alloc);
+    var second = try client.create(80, 24, fixture.home);
+    defer second.deinit(alloc);
+    var third = try client.create(80, 24, fixture.home);
+    defer third.deinit(alloc);
+    var original = try fixture.checkpoint(3, 0);
+    defer original.deinit();
+    const first_saved = original.state.current.entries[0].id;
+    const second_saved = original.state.current.entries[1].id;
+    const third_saved = original.state.current.entries[2].id;
+    try client.pairSessions(first.id, second.id);
+    try client.swapPairSides(first.id);
+    try client.setPairRatio(second.id, 12345);
+    try client.rememberPairFocus(second.id);
+    try client.setPairZoom(second.id, true);
+    try client.moveDisplayItem(second.id, 1);
+    try client.setFocus(second.id, true);
+    client.deinit();
+    var saved = try fixture.checkpoint(3, 0);
+    defer saved.deinit();
+    for (0..200) |_| {
+        if (saved.state.current.items.len == 2 and saved.state.current.items[1].ratio == 12345 and
+            saved.state.current.selected == second_saved) break;
+        try std.testing.io.sleep(.fromMilliseconds(10), .awake);
+        const next = try fixture.checkpoint(3, 0);
+        saved.deinit();
+        saved = next;
+    } else return error.LayoutCheckpointTimeout;
+    try std.testing.expectEqual(third_saved, saved.state.current.items[0].left);
+    const pair = saved.state.current.items[1];
+    try std.testing.expectEqual(second_saved, pair.left);
+    try std.testing.expectEqual(first_saved, pair.right.?);
+    try std.testing.expect(!pair.focus_right and pair.zoomed);
+    fixture.stop();
+    try fixture.start();
+    var offered = try fixture.checkpoint(0, 3);
+    defer offered.deinit();
+    try std.testing.expectEqualDeep(saved.state.current, offered.state.pending);
+}
+
+test "closing final session durably removes recovery intent before daemon loss" {
+    const alloc = std.testing.allocator;
+    var fixture = try RecoveryFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    var client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var first = try client.create(80, 24, "/tmp");
+    defer first.deinit(alloc);
+    var saved = try fixture.checkpoint(1, 0);
+    saved.deinit();
+    try client.closeSession(first.id);
+    client.deinit();
+    fixture.stop();
+    try fixture.start();
+    var empty = try fixture.checkpoint(0, 0);
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.state.pending.entries.len);
+}
+
+test "recovery admits maximum dormant workspace without spawning background shells" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]usize{ 10, 100, recovery.max_entries, recovery.max_entries }, 0..) |count, case| {
+        const worst_strings = case == 3;
+        var fixture = try RecoveryFixture.init();
+        defer fixture.deinit();
+        const directory = try std.fmt.allocPrintSentinel(alloc, "{s}/Library/Application Support/boringterminal", .{fixture.home}, 0);
+        defer alloc.free(directory);
+        try std.Io.Dir.cwd().createDirPath(io, directory);
+        try std.testing.expectEqual(@as(c_int, 0), c.chmod(directory, 0o700));
+        var document = try recovery.Document.init(alloc);
+        defer document.deinit();
+        const entries = try document.allocator().alloc(recovery.Entry, count);
+        const items = try document.allocator().alloc(recovery.Item, count);
+        const title = [_]u8{'"'} ** recovery.max_title_bytes;
+        const long_cwd = "/" ++ [_]u8{'\\'} ** (recovery.max_cwd_bytes - 1);
+        for (entries, items, 0..) |*entry, *item, index| {
+            entry.* = .{
+                .id = index + 1,
+                .title = if (worst_strings) &title else "Boring Terminal",
+                .cwd = if (worst_strings) long_cwd else fixture.home,
+            };
+            item.* = .{ .left = index + 1 };
+        }
+        document.state.current = .{ .entries = entries, .items = items, .selected = 1 };
+        {
+            var store = try @import("recovery_store.zig").Store.open(alloc, io, directory);
+            defer store.deinit();
+            try store.commit(document.state, false);
+        }
+        try fixture.start();
+        var client = try daemon_client.Client.init(alloc, io, &fixture.env);
+        defer client.deinit();
+        const with_fresh = case == 2;
+        var fresh_id: ?u64 = null;
+        if (with_fresh) {
+            var fresh = try client.create(80, 24, fixture.home);
+            defer fresh.deinit(alloc);
+            fresh_id = fresh.id;
+        }
+        var offered = try client.listRegistry();
+        defer offered.deinit(alloc);
+        try std.testing.expectEqual(count, offered.recovery.pending_count);
+        const accept_start = std.Io.Clock.awake.now(io);
+        try client.acceptRecovery(offered.recovery.generation);
+        const accept_ms = @divTrunc(accept_start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds, 1_000_000);
+        var dormant = try client.listRegistry();
+        defer dormant.deinit(alloc);
+        try std.testing.expectEqual(count + @intFromBool(with_fresh), dormant.sessions.len);
+        try std.testing.expectEqual(with_fresh, dormant.recovery.failed);
+        var restored_id: u64 = 0;
+        for (dormant.sessions) |entry| {
+            try std.testing.expectEqual(if (entry.id == fresh_id) protocol.RecoveryPhase.live else protocol.RecoveryPhase.dormant, entry.phase);
+            if (entry.id != fresh_id and restored_id == 0) restored_id = entry.id;
+        }
+        var persisted = try fixture.checkpoint(count, 0);
+        defer persisted.deinit();
+        const encoded = try persisted.encode(alloc);
+        defer alloc.free(encoded);
+        const activation_start = std.Io.Clock.awake.now(io);
+        var active = try client.activateRecovery(restored_id, worst_strings, false, 80, 24);
+        defer active.deinit(alloc);
+        const activation_ms = @divTrunc(activation_start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds, 1_000_000);
+        try std.testing.expectEqual(protocol.RecoveryPhase.live, active.phase);
+        try std.testing.expectEqualStrings("Boring Terminal", active.title);
+        var after = try client.listRegistry();
+        defer after.deinit(alloc);
+        for (after.sessions) |entry| try std.testing.expectEqual(
+            if (entry.id == active.id or entry.id == fresh_id) protocol.RecoveryPhase.live else protocol.RecoveryPhase.dormant,
+            entry.phase,
+        );
+        if (fresh_id) |id| {
+            // Closing an unsaved overflow shell must not be trapped behind a
+            // capture limit. A new complete checkpoint then clears degradation.
+            try client.closeSession(id);
+            for (0..200) |_| {
+                var registry = try client.listRegistry();
+                defer registry.deinit(alloc);
+                if (!registry.recovery.failed) break;
+                try io.sleep(.fromMilliseconds(10), .awake);
+            } else return error.CapacityDidNotRecover;
+            var complete = try fixture.checkpoint(count, 0);
+            complete.deinit();
+            var extra = try client.create(80, 24, fixture.home);
+            defer extra.deinit(alloc);
+            // Closing a saved dormant entry while over capacity must remove
+            // that exact saved intent, then include the new shell when it fits.
+            const saved_to_close = dormant.sessions[dormant.sessions.len - 1].id;
+            try std.testing.expect(saved_to_close != active.id);
+            try client.closeSession(saved_to_close);
+            for (0..200) |_| {
+                var registry = try client.listRegistry();
+                defer registry.deinit(alloc);
+                if (!registry.recovery.failed) break;
+                try io.sleep(.fromMilliseconds(10), .awake);
+            } else return error.CapacityDidNotRecover;
+            var remaining = try client.listRegistry();
+            defer remaining.deinit(alloc);
+            try std.testing.expectEqual(count, remaining.sessions.len);
+            for (remaining.sessions) |entry| try std.testing.expect(entry.id != saved_to_close);
+        }
+        std.debug.print("recovery scale: {d} entries, worst strings={any}, {d} checkpoint bytes, accept+durable commit {d}ms, activate one {d}ms\n", .{ count, worst_strings, encoded.len, accept_ms, activation_ms });
+    }
+}
+
+test "output-only workload leaves recovery checkpoint revision unchanged" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = try RecoveryFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    var client = try daemon_client.Client.init(alloc, io, &fixture.env);
+    defer client.deinit();
+    var session = try client.create(80, 24, fixture.home);
+    defer session.deinit(alloc);
+    // A hermetic shell emits no title/cwd/prompt escape sequences. Keep output
+    // flowing across two cwd sampler periods, with no session exit transition.
+    try client.writeInput(session.id, "exec /bin/sh -c 'while :; do printf \"recovery-output-only\\n\"; sleep 0.05; done'\n");
+    try io.sleep(.fromMilliseconds(6000), .awake);
+    var before = try fixture.checkpoint(1, 0);
+    defer before.deinit();
+    var first = try client.snapshot(session.id);
+    defer first.deinit(alloc);
+    try std.testing.expect(snapshotContains(&first, "recovery-output-only"));
+    const primary = try std.fmt.allocPrintSentinel(alloc, "{s}/Library/Application Support/boringterminal/recovery.json", .{fixture.home}, 0);
+    defer alloc.free(primary);
+    const previous = try std.fmt.allocPrintSentinel(alloc, "{s}/Library/Application Support/boringterminal/recovery.previous.json", .{fixture.home}, 0);
+    defer alloc.free(previous);
+    var before_files: [2]c.Stat = undefined;
+    for ([_][:0]const u8{ primary, previous }, &before_files) |path, *stat|
+        try std.testing.expectEqual(@as(c_int, 0), c.fstatat(c.AT.FDCWD, path, stat, 0));
+    try io.sleep(.fromMilliseconds(6000), .awake);
+    var after = try fixture.checkpoint(1, 0);
+    defer after.deinit();
+    var last = try client.snapshot(session.id);
+    defer last.deinit(alloc);
+    try std.testing.expect(!last.exited);
+    try std.testing.expect(last.grid_epoch != first.grid_epoch);
+    try std.testing.expectEqual(before.state.revision, after.state.revision);
+    for ([_][:0]const u8{ primary, previous }, before_files) |path, old_stat| {
+        var new_stat: c.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.fstatat(c.AT.FDCWD, path, &new_stat, 0));
+        try std.testing.expectEqual(old_stat.ino, new_stat.ino);
+        try std.testing.expectEqualDeep(old_stat.mtimespec, new_stat.mtimespec);
+    }
+}
+
+const RecoveryCall = struct {
+    client: *daemon_client.Client,
+    value: u64,
+    activate: bool = false,
+    failure: ?anyerror = null,
+
+    fn run(self: *RecoveryCall) void {
+        self.runFallible() catch |err| {
+            self.failure = err;
+        };
+    }
+
+    fn runFallible(self: *RecoveryCall) !void {
+        if (self.activate) {
+            var metadata = try self.client.activateRecovery(self.value, false, false, 80, 24);
+            defer metadata.deinit(self.client.gpa);
+            try std.testing.expect(metadata.phase == .live or metadata.phase == .starting);
+        } else try self.client.acceptRecovery(self.value);
+    }
+};
+
+test "restore is durable and lazy with concurrent viewers and duplicate activation" {
+    const alloc = std.testing.allocator;
+    var fixture = try RecoveryFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    var original = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var left = try original.create(80, 24, "/tmp");
+    defer left.deinit(alloc);
+    var right = try original.createBeside(left.id, 80, 24, "/tmp");
+    defer right.deinit(alloc);
+    try original.setFocus(right.id, true);
+    original.deinit();
+    var saved = try fixture.checkpoint(2, 0);
+    saved.deinit();
+    fixture.stop();
+    try fixture.start();
+    var client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    defer client.deinit();
+    var other = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    defer other.deinit();
+    var fresh = try client.create(80, 24, "/tmp");
+    defer fresh.deinit(alloc);
+    var offered = try client.listRegistry();
+    defer offered.deinit(alloc);
+    try std.testing.expectEqual(@as(u32, 2), offered.recovery.pending_count);
+    var calls = [_]RecoveryCall{
+        .{ .client = &client, .value = offered.recovery.generation },
+        .{ .client = &other, .value = offered.recovery.generation },
+    };
+    const a = try std.Thread.spawn(.{}, RecoveryCall.run, .{&calls[0]});
+    const b = try std.Thread.spawn(.{}, RecoveryCall.run, .{&calls[1]});
+    a.join();
+    b.join();
+    for (calls) |call| if (call.failure) |err| return err;
+    var restored = try client.listRegistry();
+    defer restored.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 3), restored.sessions.len);
+    try std.testing.expectEqual(fresh.id, restored.display_items[0].single);
+    const pair = restored.display_items[1].pair;
+    // A path can be reused by a replacement daemon. Old runtime IDs must
+    // never activate a shell unless the original owner epoch also matches.
+    other.recovery_epoch.store(restored.recovery.owner_epoch ^ 2, .release);
+    try std.testing.expectError(error.RemoteError, other.activateRecovery(pair.right, false, false, 80, 24));
+    other.recovery_epoch.store(restored.recovery.owner_epoch, .release);
+    try std.testing.expectEqual(pair.right, restored.selected.?);
+    var dormant_count: usize = 0;
+    for (restored.sessions) |entry| dormant_count += @intFromBool(entry.phase == .dormant);
+    try std.testing.expectEqual(@as(usize, 2), dormant_count);
+    try std.testing.expectEqual(@as(u32, 0), restored.recovery.pending_count);
+    var committed = try fixture.checkpoint(3, 0);
+    committed.deinit();
+    // Dormant entries have no snapshot/VT. Failed reads don't start them.
+    try std.testing.expectError(error.RemoteError, client.snapshot(pair.left));
+    calls = .{
+        .{ .client = &client, .value = pair.left, .activate = true },
+        .{ .client = &other, .value = pair.left, .activate = true },
+    };
+    const c1 = try std.Thread.spawn(.{}, RecoveryCall.run, .{&calls[0]});
+    const c2 = try std.Thread.spawn(.{}, RecoveryCall.run, .{&calls[1]});
+    c1.join();
+    c2.join();
+    for (calls) |call| if (call.failure) |err| return err;
+    var activated = try client.listRegistry();
+    defer activated.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 3), activated.sessions.len);
+    for (activated.sessions) |entry| {
+        if (entry.id == pair.left) try std.testing.expectEqual(protocol.RecoveryPhase.live, entry.phase);
+        if (entry.id == pair.right) try std.testing.expectEqual(protocol.RecoveryPhase.dormant, entry.phase);
+    }
+    // Viewer objects for restored rows remain lightweight until visible. A
+    // stale dormant record is safe even if another viewer already activated it.
+    for (restored.sessions) |entry| {
+        if (entry.id != pair.left) continue;
+        const view = try daemon_client.Session.create(alloc, std.testing.io, &client, entry);
+        defer view.destroy();
+        try view.startRefreshWorker(.{ .callback = recoveryRefreshComplete });
+        try std.testing.expect(view.refresh_thread == null);
+        try std.testing.expect(view.render_snapshot == null);
+        try std.testing.expectError(error.SessionDormant, view.refresh());
+        view.setVisible(true);
+        for (0..200) |_| {
+            if (view.recovery_phase.load(.acquire) == .live) break;
+            try std.testing.io.sleep(.fromMilliseconds(10), .awake);
+        }
+        try std.testing.expectEqual(protocol.RecoveryPhase.live, view.recovery_phase.load(.acquire));
+    }
+    // Closing a dormant entry must not activate it, and persists pair collapse.
+    try client.closeSession(pair.right);
+    var collapsed = try client.listRegistry();
+    defer collapsed.deinit(alloc);
+    try std.testing.expectEqual(pair.left, collapsed.display_items[1].single);
+    var after_close = try fixture.checkpoint(2, 0);
+    after_close.deinit();
+}
+
+fn recoveryRefreshComplete(_: ?*anyopaque, _: u64) void {}
+
+test "closing or draining blocked activation cannot publish a late shell and viewer cancellation is prompt" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_][]const u8{ "before_spawn", "before_publish" }) |stage| {
+        for ([_]bool{ false, true }) |drain| {
+            var fixture = try RecoveryFixture.init();
+            defer fixture.deinit();
+            try fixture.env.put("BT_TEST_ACTIVATION_STAGE", stage);
+            try fixture.startExecutable(test_options.recovery_test_daemon_path);
+            {
+                var original = try daemon_client.Client.init(alloc, io, &fixture.env);
+                defer original.deinit();
+                var metadata = try original.create(80, 24, fixture.home);
+                defer metadata.deinit(alloc);
+                var saved = try fixture.checkpoint(1, 0);
+                saved.deinit();
+            }
+            fixture.stop();
+            try fixture.startExecutable(test_options.recovery_test_daemon_path);
+            var client = try daemon_client.Client.init(alloc, io, &fixture.env);
+            defer client.deinit();
+            var offer = try client.listRegistry();
+            defer offer.deinit(alloc);
+            try client.acceptRecovery(offer.recovery.generation);
+            var restored = try client.listRegistry();
+            defer restored.deinit(alloc);
+            const metadata = restored.sessions[0];
+            const view = try daemon_client.Session.create(alloc, io, &client, metadata);
+            defer view.destroy();
+            try view.startRefreshWorker(.{ .callback = recoveryRefreshComplete });
+            view.setVisible(true);
+            var home = try std.Io.Dir.openDirAbsolute(io, fixture.home, .{});
+            defer home.close(io);
+            for (0..200) |_| {
+                home.access(io, "activation-ready", .{}) catch {
+                    try io.sleep(.fromMilliseconds(10), .awake);
+                    continue;
+                };
+                break;
+            } else return error.ActivationDidNotBlock;
+            const cancel_start = std.Io.Clock.awake.now(io);
+            view.stopRefreshWorker();
+            const cancel_ms = @divTrunc(cancel_start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds, 1_000_000);
+            // Gate stays closed for 10s; cancellation must not wait for it.
+            try std.testing.expect(cancel_ms < 1000);
+            if (drain) {
+                const path = try protocol.socketPath(alloc, &fixture.env);
+                defer alloc.free(path);
+                const fd = try @import("unix_connect.zig").connect(path);
+                defer _ = c.close(fd);
+                try lifecycle.writeFrame(fd, .terminate_all, &.{});
+                var reply = try lifecycle.readFrame(fd, alloc);
+                defer reply.deinit(alloc);
+                try std.testing.expectEqual(lifecycle.Tag.ok, reply.tag);
+            } else {
+                try client.closeSession(metadata.id);
+            }
+            var removed = try fixture.checkpoint(0, 0);
+            removed.deinit();
+            try home.writeFile(io, .{ .sub_path = "activation-release", .data = "" });
+            // The late spawn must be destroyed, never resurrected in registry
+            // or checkpoint. Restart also checks the persisted removal.
+            for (0..200) |_| {
+                home.access(io, "activation-finished", .{}) catch {
+                    try io.sleep(.fromMilliseconds(10), .awake);
+                    continue;
+                };
+                break;
+            } else return error.ActivationDidNotFinish;
+            if (std.mem.eql(u8, stage, "before_publish")) {
+                const bytes = try home.readFileAlloc(io, "activation-child", alloc, .limited(32));
+                defer alloc.free(bytes);
+                const child = try std.fmt.parseInt(c.pid_t, bytes, 10);
+                try std.testing.expectEqual(@as(c_int, -1), c.kill(child, @enumFromInt(0)));
+                try std.testing.expectEqual(std.c.E.SRCH, c.errno(-1));
+            }
+            if (!drain) {
+                var empty = try client.listRegistry();
+                defer empty.deinit(alloc);
+                try std.testing.expectEqual(@as(usize, 0), empty.sessions.len);
+            }
+            fixture.stop();
+            try fixture.start();
+            var final = try fixture.checkpoint(0, 0);
+            final.deinit();
+        }
+    }
+}
+
+test "failed removal barrier keeps the live session and reports degraded recovery" {
+    const alloc = std.testing.allocator;
+    var fixture = try RecoveryFixture.init();
+    defer fixture.deinit();
+    try fixture.start();
+    var client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    defer client.deinit();
+    var first = try client.create(80, 24, "/tmp");
+    defer first.deinit(alloc);
+    var saved = try fixture.checkpoint(1, 0);
+    saved.deinit();
+    const path = try std.fmt.allocPrintSentinel(alloc, "{s}/Library/Application Support/boringterminal/recovery.json", .{fixture.home}, 0);
+    defer alloc.free(path);
+    const held = try std.fmt.allocPrintSentinel(alloc, "{s}.held", .{path}, 0);
+    defer alloc.free(held);
+    try std.testing.expectEqual(@as(c_int, 0), c.rename(path, held));
+    try std.testing.expectEqual(@as(c_int, 0), c.symlink("/nonexistent-recovery-fixture", path));
+    try std.testing.expectError(error.RemoteError, client.closeSession(first.id));
+    var registry = try client.listRegistry();
+    defer registry.deinit(alloc);
+    try std.testing.expect(registry.recovery.failed);
+    try std.testing.expectEqual(@as(usize, 1), registry.sessions.len);
+    var snapshot = try client.snapshot(first.id);
+    snapshot.deinit(alloc);
+    try std.testing.expectEqual(@as(c_int, 0), c.unlink(path));
+    try std.testing.expectEqual(@as(c_int, 0), c.rename(held, path));
+    try client.closeSession(first.id);
+    var empty = try client.listRegistry();
+    defer empty.deinit(alloc);
+    try std.testing.expect(!empty.recovery.failed);
+    try std.testing.expectEqual(@as(usize, 0), empty.sessions.len);
+}
+
+test "missing restored cwd waits for explicit retry or home and dismissal survives loss" {
+    const alloc = std.testing.allocator;
+    var fixture = try RecoveryFixture.init();
+    defer fixture.deinit();
+    const directory = try std.fmt.allocPrint(alloc, "{s}/gone", .{fixture.home});
+    defer alloc.free(directory);
+    try std.Io.Dir.createDirAbsolute(std.testing.io, directory, .default_dir);
+    try fixture.start();
+    var original = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var first = try original.create(80, 24, directory);
+    first.deinit(alloc);
+    original.deinit();
+    var before = try fixture.checkpoint(1, 0);
+    before.deinit();
+    fixture.stop();
+    try std.Io.Dir.cwd().deleteTree(std.testing.io, directory);
+    try fixture.start();
+    var client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var offer = try client.listRegistry();
+    defer offer.deinit(alloc);
+    try client.acceptRecovery(offer.recovery.generation);
+    var restored = try client.listRegistry();
+    defer restored.deinit(alloc);
+    const id = restored.sessions[0].id;
+    var failed = try client.activateRecovery(id, false, false, 80, 24);
+    defer failed.deinit(alloc);
+    try std.testing.expectEqual(protocol.RecoveryPhase.cwd_unavailable, failed.phase);
+    // Even after the directory reappears, ordinary activation cannot retry.
+    try std.Io.Dir.createDirAbsolute(std.testing.io, directory, .default_dir);
+    var passive = try client.activateRecovery(id, false, false, 80, 24);
+    defer passive.deinit(alloc);
+    try std.testing.expectEqual(protocol.RecoveryPhase.cwd_unavailable, passive.phase);
+    const directory_z = try alloc.dupeZ(u8, directory);
+    defer alloc.free(directory_z);
+    try std.testing.expectEqual(@as(c_int, 0), c.chmod(directory_z, 0));
+    defer _ = c.chmod(directory_z, 0o700);
+    var denied = try client.activateRecovery(id, false, true, 80, 24);
+    defer denied.deinit(alloc);
+    try std.testing.expectEqual(protocol.RecoveryPhase.cwd_denied, denied.phase);
+    try std.testing.expectEqual(@as(c_int, 0), c.chmod(directory_z, 0o700));
+    var home = try client.activateRecovery(id, true, true, 80, 24);
+    defer home.deinit(alloc);
+    try std.testing.expectEqual(protocol.RecoveryPhase.live, home.phase);
+    client.deinit();
+    var active = try fixture.checkpoint(1, 0);
+    active.deinit();
+    fixture.stop();
+    try fixture.start();
+    var dismiss_client = try daemon_client.Client.init(alloc, std.testing.io, &fixture.env);
+    var pending = try dismiss_client.listRegistry();
+    defer pending.deinit(alloc);
+    try dismiss_client.dismissRecovery(pending.recovery.generation);
+    try dismiss_client.dismissRecovery(pending.recovery.generation);
+    dismiss_client.deinit();
+    fixture.stop();
+    try fixture.start();
+    var empty = try fixture.checkpoint(0, 0);
+    empty.deinit();
+}
 
 fn recordEvent(context: ?*anyopaque, id: u64, _: protocol.EventFlags) void {
     const state: *EventState = @ptrCast(@alignCast(context.?));
@@ -835,7 +1518,7 @@ test "daemon command and event connections survive subscription replacement" {
     }
     try std.testing.expect(saw_cpr_reply);
 
-    // RFC 0018 metadata remains daemon-owned and crosses the real v13
+    // RFC 0018 metadata remains daemon-owned and crosses the real current
     // snapshot boundary as a dense, visible-cell table.
     try client.writeInput(
         created.id,

@@ -1,9 +1,7 @@
-//! Frozen viewer-side adapter for the v13 public attach dialect.
-//! Delete this capsule when it leaves RFC 0019's two-previous-public-dialect
-//! compatibility window.
-
-const protocol = @import("../../../daemon/protocol.zig");
-const vt = @import("../../../vt.zig");
+//! Historical keyboard regression oracle only. Never imported by viewer/daemon.
+//! Kept so retiring production v13 support does not shrink the conformance ratchet.
+const protocol = @import("../daemon/protocol.zig");
+const vt = @import("../vt.zig");
 
 pub const version: u16 = 13;
 
@@ -46,16 +44,6 @@ pub const KeyEncoding = union(enum) {
     /// Release-only/new physical keys cannot have been negotiated by v13.
     ignored,
 };
-
-/// Public v13 mouse requests ended after the zero-based cell coordinates.
-pub fn encodeMouseEvent(enc: *protocol.Encoder, event: vt.mouse.Event) !void {
-    try enc.byte(@intFromEnum(event.kind));
-    try enc.byte(@intFromEnum(event.button));
-    const modifiers: u3 = @bitCast(event.modifiers);
-    try enc.byte(@intCast(modifiers));
-    try enc.int(u16, event.col);
-    try enc.int(u16, event.row);
-}
 
 pub fn classifyKey(event: vt.keyboard.Event) KeyEncoding {
     if (event.code == .text) {
@@ -145,4 +133,15 @@ test "v13 committed text uses raw input" {
         .text = "\x03",
     });
     try testing.expect(control_key == .semantic);
+}
+
+pub fn encodeKeyEvent(enc: *protocol.Encoder, event: vt.keyboard.Event) !@import("../shell/daemon_protocol/selected.zig").KeyEncoding {
+    return switch (classifyKey(event)) {
+        .semantic => |code| blk: {
+            try encodeSemanticKey(enc, code, event);
+            break :blk .{ .semantic = {} };
+        },
+        .raw => |bytes| .{ .raw = bytes },
+        .ignored => .ignored,
+    };
 }

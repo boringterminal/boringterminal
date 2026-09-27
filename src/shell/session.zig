@@ -107,6 +107,12 @@ pub const Session = struct {
     cwd_mutex: std.Io.Mutex = .init,
     cwd_buf: [pty_mod.max_path_len]u8 = undefined,
     cwd_len: usize = 0,
+    cwd_observed_at: i64 = 0,
+    recovery_id: u64 = 0,
+    recovery_cwd_buf: [pty_mod.max_path_len]u8 = undefined,
+    recovery_cwd_len: usize = 0,
+    recovery_cwd_sampled: bool = false,
+    recovery_cwd_observed_at: i64 = 0,
     metadata_dirty: std.atomic.Value(bool) = .init(false),
 
     pub fn create(
@@ -118,6 +124,31 @@ pub const Session = struct {
         rows: u16,
         cwd: ?[]const u8,
     ) !*Session {
+        return createImpl(gpa, io, env, id, cols, rows, cwd, false);
+    }
+
+    pub fn createRecovering(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        env: *const std.process.Environ.Map,
+        id: u64,
+        cols: u16,
+        rows: u16,
+        cwd: ?[]const u8,
+    ) !*Session {
+        return createImpl(gpa, io, env, id, cols, rows, cwd, true);
+    }
+
+    fn createImpl(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        env: *const std.process.Environ.Map,
+        id: u64,
+        cols: u16,
+        rows: u16,
+        cwd: ?[]const u8,
+        strict_cwd: bool,
+    ) !*Session {
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
 
@@ -126,6 +157,7 @@ pub const Session = struct {
         const pty = try pty_mod.Pty.spawn(gpa, .{
             .env = env,
             .cwd = cwd,
+            .strict_cwd = strict_cwd,
             .cols = cols,
             .rows = rows,
         });
@@ -138,6 +170,16 @@ pub const Session = struct {
             .graphics_store = .{ .temporary_directory = env.get("TMPDIR") },
             .pty = pty,
         };
+        var random_id: [8]u8 = undefined;
+        io.random(&random_id);
+        self.recovery_id = std.mem.readInt(u64, &random_id, .little) | 1;
+        if (cwd) |path| {
+            if (path.len <= self.recovery_cwd_buf.len) {
+                @memcpy(self.recovery_cwd_buf[0..path.len], path);
+                self.recovery_cwd_len = path.len;
+            }
+        }
+        self.recovery_cwd_observed_at = std.Io.Timestamp.now(io, .real).toMilliseconds();
         self.setTitle("Boring Terminal");
         return self;
     }
@@ -330,6 +372,22 @@ pub const Session = struct {
         return out[0..self.cwd_len];
     }
 
+    /// Metadata only: never opens or enumerates the directory being recorded.
+    /// Called by the recovery worker, never a PTY output/renderer thread.
+    pub fn sampleRecoveryWorkingDirectory(self: *Session) bool {
+        if (self.exited.load(.acquire)) return false;
+        var buffer: [pty_mod.max_path_len]u8 = undefined;
+        const path = self.pty.foregroundWorkingDirectory(&buffer) orelse return false;
+        self.cwd_mutex.lockUncancelable(self.io);
+        defer self.cwd_mutex.unlock(self.io);
+        if (std.mem.eql(u8, self.recovery_cwd_buf[0..self.recovery_cwd_len], path)) return false;
+        @memcpy(self.recovery_cwd_buf[0..path.len], path);
+        self.recovery_cwd_len = path.len;
+        self.recovery_cwd_sampled = true;
+        self.recovery_cwd_observed_at = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
+        return self.cwd_len == 0;
+    }
+
     fn applyWorkingDirectoryReport(self: *Session, uri: []const u8) void {
         if (uri.len == 0) {
             self.setWorkingDirectory(null);
@@ -353,6 +411,7 @@ pub const Session = struct {
         std.debug.assert(next.len <= self.cwd_buf.len);
         @memcpy(self.cwd_buf[0..next.len], next);
         self.cwd_len = next.len;
+        self.cwd_observed_at = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
         self.metadata_dirty.store(true, .release);
     }
 

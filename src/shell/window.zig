@@ -11,6 +11,8 @@ const objc = @import("../render/objc.zig");
 const renderer_mod = @import("../render/renderer.zig");
 const vt = @import("../vt.zig");
 const daemon_client = @import("daemon_client.zig");
+const recovery_ui = @import("recovery_ui.zig");
+const recovery_smoke_enabled = @import("app_options").recovery_ui_smoke;
 const daemon_protocol = @import("../daemon/protocol.zig");
 const product_version = @import("../version.zig");
 const display_registry = @import("../daemon/display_registry.zig");
@@ -149,6 +151,14 @@ const App = struct {
     sessions: daemon_client.SessionManager,
     display_items: std.ArrayList(daemon_protocol.DisplayItem) = .empty,
     display_registry_dirty: std.atomic.Value(bool) = .init(false),
+    recovery_status: daemon_protocol.RecoveryStatus = .{},
+    recovery_banner: recovery_ui.Notice = .{},
+    recovery_panes: [2]recovery_ui.Notice = .{ .{}, .{} },
+    recovery_height: f32 = 0,
+    recovery_thread: ?std.Thread = null,
+    recovery_busy: bool = false,
+    recovery_operation_failed: bool = false,
+    select_recovered_on_sync: bool = false,
     sessions_mutex: std.Io.Mutex = .init,
     active_session_addr: std.atomic.Value(usize) = .init(0),
     renderer: renderer_mod.Renderer,
@@ -351,6 +361,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
 
     var registry = try app.client.listRegistry();
     defer registry.deinit(gpa);
+    app.recovery_status = registry.recovery;
     if (registry.sessions.len == 0) {
         const preferred_cwd: ?[]const u8 = if (std.mem.eql(u8, launch_cwd, "/")) null else launch_cwd;
         var created = try app.client.create(app.cols, app.rows, preferred_cwd);
@@ -370,7 +381,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
         }
         try app.display_items.appendSlice(gpa, registry.display_items);
     }
-    const first_id = display_model.focusedId(app.display_items.items[0]);
+    const first_id = registry.selected orelse display_model.focusedId(app.display_items.items[0]);
     _ = selectSessionId(first_id);
     const first = app.sessions.active().?;
     for (app.sessions.sessions.items) |session| {
@@ -407,6 +418,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
         1,
     );
     renderNow();
+    if (recovery_smoke_enabled) startRecoverySmoke();
     objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) void)(ns_app, objc.sel("run"));
 }
 
@@ -414,6 +426,218 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.M
 
 fn activeSession() *daemon_client.Session {
     return app.sessions.active().?;
+}
+
+fn sessionAcceptsInput(session: *daemon_client.Session) bool {
+    return !app.client.isDisconnected() and
+        session.recovery_phase.load(.acquire) == .live and !session.exited.load(.acquire);
+}
+
+fn showRecoveryError(title: [*:0]const u8, detail: [*:0]const u8) void {
+    const alert = objc.allocInit(objc.cls("NSAlert"));
+    defer objc.release(alert);
+    objc.setId(alert, objc.sel("setMessageText:"), objc.nsString(title));
+    objc.setId(alert, objc.sel("setInformativeText:"), objc.nsString(detail));
+    _ = objc.msg(*const fn (objc.Id, objc.Sel, objc.Id) callconv(.c) objc.Id)(alert, objc.sel("addButtonWithTitle:"), objc.nsString("OK"));
+    _ = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.NSInteger)(alert, objc.sel("runModal"));
+}
+
+fn updateRecoveryChrome() void {
+    if (app.root_view == null or app.recovery_banner.view == null) return;
+    const bounds = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGRect)(app.root_view, objc.sel("bounds"));
+    const disconnected = app.client.isDisconnected();
+    const offered = app.recovery_status.available and app.recovery_status.pending_count != 0;
+    const show = disconnected or offered or app.recovery_status.failed or app.recovery_busy;
+    const height: f32 = if (show) (if (bounds.size.width < 660) 112 else 76) else 0;
+    if (height != app.recovery_height) {
+        app.recovery_height = height;
+        layoutSessionBar();
+        syncSizes();
+    }
+    if (show) {
+        var text: [160]u8 = undefined;
+        const title: []const u8 = if (disconnected) "Background service disconnected" else if (app.recovery_busy) "Saving session recovery…" else if (offered) std.fmt.bufPrint(&text, "Restore {d} interrupted sessions?", .{app.recovery_status.pending_count}) catch "Restore interrupted sessions?" else "Session recovery could not be saved";
+        const detail: []const u8 = if (app.recovery_operation_failed) "The operation failed. Your existing sessions have not been replaced. Try again." else if (disconnected) "Reconnect to check saved sessions. Commands will not be replayed." else if (offered) "Fresh shells in saved folders. Previous programs won’t resume." else "Terminal work can continue, but recent changes may not survive a shutdown.";
+        app.recovery_banner.show(recovery_ui.rect(0, @max(0, bounds.size.height - height), bounds.size.width, height), title, detail, if (disconnected) "Reconnect" else if (offered) "Restore Sessions" else "", if (offered and !disconnected) "Dismiss" else "", !app.recovery_busy, 0);
+    } else app.recovery_banner.hide();
+    const had_recovery_pane = app.recovery_panes[0].visible or app.recovery_panes[1].visible;
+    defer if (had_recovery_pane != (app.recovery_panes[0].visible or app.recovery_panes[1].visible)) layoutSessionBar();
+    for (&app.recovery_panes) |*pane| pane.hide();
+    if (disconnected) return; // Preserve the last rendered terminal underneath.
+    const frame = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGRect)(app.view, objc.sel("frame"));
+    const index = activeDisplayIndex() orelse return;
+    switch (app.display_items.items[index]) {
+        .single => |id| showRecoveryPane(0, id, frame),
+        .pair => |pair| if (zoomedPairMember(pair)) |id| {
+            showRecoveryPane(0, id, frame);
+        } else if (activePairGeometry(pair)) |geometry| {
+            showRecoveryPane(0, pair.left, recovery_ui.rect(frame.origin.x, frame.origin.y, geometry.left_width, frame.size.height));
+            showRecoveryPane(1, pair.right, recovery_ui.rect(frame.origin.x + geometry.right_origin, frame.origin.y, geometry.right_width, frame.size.height));
+        },
+    }
+}
+
+fn showRecoveryPane(slot: usize, id: u64, frame: objc.CGRect) void {
+    const session = sessionById(id) orelse return;
+    const phase = session.recovery_phase.load(.acquire);
+    if (phase == .live) return;
+    const title: []const u8 = switch (phase) {
+        .dormant => "Ready to open a fresh shell",
+        .starting => "Opening a fresh shell…",
+        .cwd_unavailable => "The saved folder is unavailable",
+        .cwd_denied => "Access to the saved folder was denied",
+        .spawn_failed => "The shell could not be started",
+        .live => unreachable,
+    };
+    var cwd: [1024]u8 = undefined;
+    session.title_mutex.lockUncancelable(app.io);
+    const len = session.cwd_len;
+    @memcpy(cwd[0..len], session.cwd_buf[0..len]);
+    session.title_mutex.unlock(app.io);
+    app.recovery_panes[slot].show(frame, title, if (len != 0) cwd[0..len] else "No saved folder", if (phase == .starting) "" else if (phase == .dormant) "Open Shell" else "Retry", if (phase == .starting) "" else "Open in Home", !app.recovery_busy, id);
+}
+
+const RecoveryJob = struct {
+    kind: enum { accept, dismiss, reconnect },
+    generation: u64,
+    failure: ?anyerror = null,
+    replacement: ?daemon_client.Client = null,
+    registry: ?daemon_protocol.RegistrySnapshot = null,
+    sessions: std.ArrayList(*daemon_client.Session) = .empty,
+
+    fn run(self: *RecoveryJob) void {
+        self.perform() catch |err| {
+            self.failure = err;
+        };
+        dispatch_async_f(dispatch_main_q, self, recoveryJobFinished);
+    }
+
+    fn perform(self: *RecoveryJob) !void {
+        switch (self.kind) {
+            .accept => try app.client.acceptRecovery(self.generation),
+            .dismiss => try app.client.dismissRecovery(self.generation),
+            .reconnect => {
+                self.replacement = try daemon_client.Client.init(app.gpa, app.io, app.env);
+                const client = &self.replacement.?;
+                var registry = try client.listRegistry();
+                if (registry.sessions.len == 0) {
+                    registry.deinit(app.gpa);
+                    var fresh = try client.create(initial_cols, initial_rows, null);
+                    fresh.deinit(app.gpa);
+                    registry = try client.listRegistry();
+                }
+                self.registry = registry;
+                try self.sessions.ensureTotalCapacity(app.gpa, registry.sessions.len);
+                for (registry.sessions) |metadata| {
+                    const session = try daemon_client.Session.create(app.gpa, app.io, client, metadata);
+                    self.sessions.appendAssumeCapacity(session);
+                }
+            },
+        }
+    }
+
+    fn deinit(self: *RecoveryJob) void {
+        for (self.sessions.items) |session| session.destroy();
+        self.sessions.deinit(app.gpa);
+        if (self.registry) |*registry| registry.deinit(app.gpa);
+        if (self.replacement) |*client| client.deinit();
+        app.gpa.destroy(self);
+    }
+};
+
+fn startRecoveryJob(kind: @FieldType(RecoveryJob, "kind")) void {
+    if (app.recovery_busy or app.terminating.load(.acquire)) return;
+    const job = app.gpa.create(RecoveryJob) catch return;
+    job.* = .{ .kind = kind, .generation = app.recovery_status.generation };
+    app.recovery_busy = true;
+    app.recovery_operation_failed = false;
+    app.recovery_thread = std.Thread.spawn(.{}, RecoveryJob.run, .{job}) catch {
+        app.recovery_busy = false;
+        app.recovery_operation_failed = true;
+        job.deinit();
+        scheduleRender();
+        return;
+    };
+    scheduleRender();
+}
+
+fn recoveryJobFinished(context: ?*anyopaque) callconv(.c) void {
+    const job: *RecoveryJob = @ptrCast(@alignCast(context.?));
+    if (app.recovery_thread) |thread| thread.join();
+    app.recovery_thread = null;
+    defer job.deinit();
+    if (app.terminating.load(.acquire)) return;
+    app.recovery_busy = false;
+    app.recovery_operation_failed = job.failure != null;
+    if (job.failure == null and job.kind == .reconnect) {
+        // Stop old workers before changing the Client address they all borrow.
+        stopSyncOutputTimer();
+        closeSearch(false);
+        app.preedit.clear();
+        app.client.stopEvents();
+        app.active_session_addr.store(0, .release);
+        for (app.sessions.sessions.items) |session| session.stopRefreshWorker();
+        app.renderer.prepareForClientShutdown();
+        for (app.sessions.sessions.items) |session| session.destroy();
+        app.sessions.sessions.deinit(app.gpa);
+        app.client.deinit();
+        app.client = job.replacement.?;
+        job.replacement = null;
+        app.sessions.sessions = job.sessions;
+        job.sessions = .empty;
+        app.sessions.active_index = 0;
+        const registry = &job.registry.?;
+        app.display_items.deinit(app.gpa);
+        app.display_items = .{ .items = registry.display_items, .capacity = registry.display_items.len };
+        registry.display_items = &.{};
+        app.recovery_status = registry.recovery;
+        _ = selectSessionId(registry.selected orelse display_model.focusedId(app.display_items.items[0]));
+        if (app.client.startGraphicsReleaseWorker()) |_| {
+            app.client.enableSharedGraphics(app.renderer.sharedImageRowAlignment());
+        } else |_| {
+            app.client.disconnected.store(true, .release);
+        }
+        for (app.sessions.sessions.items) |session| {
+            session.client = &app.client;
+            session.startRefreshWorker(refreshWorkerOptions()) catch {
+                app.client.disconnected.store(true, .release);
+            };
+        }
+        app.active_session_addr.store(@intFromPtr(activeSession()), .release);
+        app.client.startEvents(app, daemonSessionChanged) catch {
+            app.client.disconnected.store(true, .release);
+        };
+        app.display_registry_dirty.store(true, .release);
+        updateSessionVisibility();
+        updateSessionFocus();
+        syncSizes();
+    } else {
+        app.select_recovered_on_sync = job.failure == null and job.kind == .accept;
+        app.display_registry_dirty.store(true, .release);
+    }
+    renderNow();
+}
+
+fn viewRestoreSessions(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
+    startRecoveryJob(if (app.client.isDisconnected()) .reconnect else .accept);
+}
+fn viewDismissRecovery(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
+    startRecoveryJob(.dismiss);
+}
+fn viewRetryRecovery(_: objc.Id, _: objc.Sel, sender: objc.Id) callconv(.c) void {
+    activateRecoveryButton(sender, false);
+}
+fn viewRecoveryHome(_: objc.Id, _: objc.Sel, sender: objc.Id) callconv(.c) void {
+    activateRecoveryButton(sender, true);
+}
+fn activateRecoveryButton(sender: objc.Id, home: bool) void {
+    if (app.client.isDisconnected() or app.recovery_busy) return;
+    const id = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.NSUInteger)(sender, objc.sel("tag"));
+    const session = sessionById(id) orelse return;
+    _ = selectSessionId(id);
+    session.requestActivation(home, true);
+    _ = objc.msg(*const fn (objc.Id, objc.Sel, objc.Id) callconv(.c) objc.BOOL)(app.window, objc.sel("makeFirstResponder:"), app.view);
+    activateSelectedSession();
 }
 
 fn sessionIndexById(id: u64) ?usize {
@@ -619,7 +843,7 @@ fn closeSession(index: usize) void {
     const selected = app.sessions.sessions.items[index];
     if (!confirmCloseSession(selected)) return;
     app.client.closeSession(selected.id) catch {
-        NSBeep();
+        showRecoveryError("Session could not be closed", "Its removal could not be saved or the background service is unavailable. The session has been kept open. Reconnect if needed, or retry after storage is available.");
         return;
     };
     if (app.sessions.sessions.items.len == 1) {
@@ -650,6 +874,7 @@ fn closeSession(index: usize) void {
 }
 
 fn confirmCloseSession(session: *daemon_client.Session) bool {
+    if (session.recovery_phase.load(.acquire) != .live) return true;
     if (session.exited.load(.acquire)) return true;
     const has_foreground_job = app.client.hasForegroundJob(session.id) catch {
         NSBeep();
@@ -776,7 +1001,7 @@ fn clearActiveSession() void {
     // Alacritty's macOS binding pairs ClearHistory with ^L for the same
     // reason: storage is terminal-owned, while mutable-screen repaint must
     // remain synchronized with the foreground application.
-    if (!session.exited.load(.acquire)) app.client.writeInput(session.id, "\x0c") catch NSBeep();
+    if (sessionAcceptsInput(session)) app.client.writeInput(session.id, "\x0c") catch NSBeep();
     session.grid_dirty.store(true, .release);
     renderNow();
 }
@@ -794,7 +1019,8 @@ fn activateSelectedSession() void {
     updateSessionFocus();
     // The renderer's held frame belongs to the previously active session.
     // A switch is therefore a presentation boundary just like a resize.
-    app.client.forceEndSynchronizedOutput(session.id) catch NSBeep();
+    if (session.recovery_phase.load(.acquire) == .live)
+        app.client.forceEndSynchronizedOutput(session.id) catch NSBeep();
     session.grid_dirty.store(true, .release);
     session.requestTitleRefresh();
     syncSizes();
@@ -817,7 +1043,10 @@ fn updateSessionFocus() void {
 /// Called by the daemon event reader. Ordinary background output stays
 /// GPU-idle; metadata and bells still refresh the switchboard surfaces.
 fn daemonSessionChanged(_: ?*anyopaque, id: u64, flags: daemon_protocol.EventFlags) void {
-    if (flags.registry) app.display_registry_dirty.store(true, .release);
+    if (flags.registry) {
+        app.display_registry_dirty.store(true, .release);
+        scheduleRender();
+    }
     if (id == 0) {
         app.sessions_mutex.lockUncancelable(app.io);
         for (app.sessions.sessions.items) |session| session.applyEvent(flags);
@@ -894,18 +1123,21 @@ fn updateSessionVisibility() void {
 }
 
 fn syncDisplayRegistry() void {
+    if (app.client.isDisconnected()) return;
     if (!app.display_registry_dirty.swap(false, .acq_rel)) return;
     var registry = app.client.listRegistry() catch {
         app.display_registry_dirty.store(true, .release);
         return;
     };
     defer registry.deinit(app.gpa);
+    app.recovery_status = registry.recovery;
 
     app.sessions_mutex.lockUncancelable(app.io);
     for (registry.sessions) |metadata| {
         var found = false;
         for (app.sessions.sessions.items) |session| {
             if (session.id == metadata.id) {
+                session.applyMetadata(metadata);
                 found = true;
                 break;
             }
@@ -952,6 +1184,11 @@ fn syncDisplayRegistry() void {
         return;
     };
     if (app.display_items.items.len == 0) return;
+    if (app.select_recovered_on_sync) {
+        app.select_recovered_on_sync = false;
+        if (registry.selected) |id| _ = selectSessionId(id);
+        app.active_session_addr.store(@intFromPtr(activeSession()), .release);
+    }
     if (display_model.itemIndex(app.display_items.items, activeSession().id) == null) {
         _ = selectSessionId(display_model.focusedId(app.display_items.items[0]));
         app.active_session_addr.store(@intFromPtr(activeSession()), .release);
@@ -1234,6 +1471,7 @@ fn renderNow() void {
     app.render_pending.store(false, .release);
 
     syncDisplayRegistry();
+    updateRecoveryChrome();
     requestDirtySessionRefreshes();
     refreshSidebar();
     updateSearchCount();
@@ -1330,7 +1568,7 @@ fn appendRendererPane(
 ) !?u64 {
     session.mutex.lockUncancelable(session.io);
     defer session.mutex.unlock(session.io);
-    const snapshot = if (session.render_snapshot) |*value| value else return error.MissingSnapshot;
+    const snapshot = if (session.render_snapshot) |*value| value else return null;
     const geometry_ready = display_model.geometryReady(
         snapshot.cols,
         snapshot.rows,
@@ -1442,7 +1680,7 @@ fn layoutSessionBar() void {
         objc.sel("bounds"),
     );
     const width: f32 = @floatCast(bounds.size.width);
-    const height: f32 = @floatCast(bounds.size.height);
+    const height: f32 = @max(1, @as(f32, @floatCast(bounds.size.height)) - app.recovery_height);
     const metrics = app.renderer.cellMetrics();
     const paired = if (activeDisplayIndex()) |index| switch (app.display_items.items[index]) {
         .single => false,
@@ -1515,7 +1753,7 @@ fn layoutSessionBar() void {
         objc.sel("setContentMinSize:"),
         .{
             .width = extra_width + terminal_min_width,
-            .height = metrics.cell_height * 4,
+            .height = app.recovery_height + @max(metrics.cell_height * 4, if (app.recovery_panes[0].visible or app.recovery_panes[1].visible) @as(f32, 136) else 0),
         },
     );
     refreshSidebar();
@@ -2424,26 +2662,19 @@ fn styleShortcutButton(button: objc.Id) void {
 }
 
 fn installTitlebarControls() void {
-    const zoom = objc.msg(*const fn (objc.Id, objc.Sel, objc.NSUInteger) callconv(.c) objc.Id)(
-        app.window,
-        objc.sel("standardWindowButton:"),
-        2, // NSWindowZoomButton
-    );
-    if (zoom == null) return;
-    const titlebar = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.Id)(
-        zoom,
-        objc.sel("superview"),
-    );
+    const accessory = objc.allocInit(objc.cls("NSTitlebarAccessoryViewController"));
+    if (accessory == null) return;
+    defer objc.release(accessory);
+    const titlebar = objc.allocInit(objc.cls("NSView"));
     if (titlebar == null) return;
-    const traffic_frame = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGRect)(
-        zoom,
-        objc.sel("frame"),
-    );
+    defer objc.release(titlebar);
+    setViewFrame(titlebar, recovery_ui.rect(0, 0, 64, 28));
+    objc.setId(accessory, objc.sel("setView:"), titlebar);
+    objc.setU(accessory, objc.sel("setLayoutAttribute:"), 2); // NSLayoutAttributeRight
+    objc.setId(app.window, objc.sel("addTitlebarAccessoryViewController:"), accessory);
     const button_size: f32 = 24;
-    const y: f32 = @floatCast(
-        traffic_frame.origin.y + (traffic_frame.size.height - button_size) / 2,
-    );
-    const first_x: f32 = @floatCast(traffic_frame.origin.x + traffic_frame.size.width + 12);
+    const y: f32 = 2;
+    const first_x: f32 = 4;
     app.sidebar_toggle_button = addTitlebarButton(
         titlebar,
         .sidebar,
@@ -2998,6 +3229,9 @@ fn buildWindow() !void {
         .next_action = objc.sel("findNext:"),
         .close_action = objc.sel("closeFind:"),
     });
+    try app.recovery_banner.init(root, view, "restoreSessions:", "dismissRecovery:");
+    app.recovery_banner.banner = true;
+    for (&app.recovery_panes) |*pane| try pane.init(root, view, "retryRecovery:", "recoveryHome:");
     objc.setId(window, objc.sel("setContentView:"), root);
     objc.setU(window, objc.sel("setAcceptsMouseMovedEvents:"), 1);
     installTitlebarControls();
@@ -3115,6 +3349,7 @@ fn resizeVisibleSession(
 
 fn ptyWrite(bytes: []const u8) void {
     const session = activeSession();
+    if (!sessionAcceptsInput(session)) return;
     if (session.exited.load(.acquire)) return;
     app.client.writeInput(session.id, bytes) catch {
         NSBeep();
@@ -3126,6 +3361,7 @@ fn ptyWrite(bytes: []const u8) void {
 
 fn ptyKey(event: vt.keyboard.Event) void {
     const session = activeSession();
+    if (!sessionAcceptsInput(session)) return;
     if (session.exited.load(.acquire)) return;
     app.client.keyEvent(session.id, event) catch {
         NSBeep();
@@ -3488,6 +3724,11 @@ fn makeViewClass() objc.Class {
     objc.addMethod(class, objc.sel("newSession:"), @ptrCast(@constCast(&viewNewSession)), "v@:@");
     objc.addMethod(class, objc.sel("newSessionBeside:"), @ptrCast(@constCast(&viewNewSessionBeside)), "v@:@");
     objc.addMethod(class, objc.sel("closeSession:"), @ptrCast(@constCast(&viewCloseSession)), "v@:@");
+    objc.addMethod(class, objc.sel("restoreSessions:"), @ptrCast(@constCast(&viewRestoreSessions)), "v@:@");
+    objc.addMethod(class, objc.sel("dismissRecovery:"), @ptrCast(@constCast(&viewDismissRecovery)), "v@:@");
+    objc.addMethod(class, objc.sel("retryRecovery:"), @ptrCast(@constCast(&viewRetryRecovery)), "v@:@");
+    objc.addMethod(class, objc.sel("recoveryHome:"), @ptrCast(@constCast(&viewRecoveryHome)), "v@:@");
+    if (recovery_smoke_enabled) objc.addMethod(class, objc.sel("recoverySmokeTick:"), @ptrCast(@constCast(&recoverySmokeTick)), "v@:@");
     objc.addMethod(class, objc.sel("closePairMember:"), @ptrCast(@constCast(&viewClosePairMember)), "v@:@");
     objc.addMethod(class, objc.sel("selectSession:"), @ptrCast(@constCast(&viewSelectSession)), "v@:@");
     objc.addMethod(class, objc.sel("selectNumberedSession:"), @ptrCast(@constCast(&viewSelectNumberedSession)), "v@:@");
@@ -5158,6 +5399,7 @@ fn mouseReportingAtLiveViewport(session: *daemon_client.Session) bool {
 
 fn reportMouse(event: objc.Id, kind: vt.mouse.Kind, button: vt.mouse.Button) bool {
     const session = activeSession();
+    if (!sessionAcceptsInput(session)) return false;
     if (session.exited.load(.acquire) or !mouseReportingAtLiveViewport(session)) return false;
     const point = pointFromEvent(event);
     const pixel_x = backingPixelCoordinate(point.x, session.requested_pixel_width);
@@ -5452,6 +5694,7 @@ fn viewCopy(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
 /// arrow keys (the alternate-scroll convention — less/vim behave as users
 /// expect). RFC 0003.
 fn viewScrollWheel(_: objc.Id, _: objc.Sel, event: objc.Id) callconv(.c) void {
+    if (!sessionAcceptsInput(activeSession())) return;
     clearHyperlinkHover();
     const dx = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGFloat)(
         event,
@@ -5515,6 +5758,7 @@ fn viewScrollWheel(_: objc.Id, _: objc.Sel, event: objc.Id) callconv(.c) void {
 }
 
 fn viewPaste(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
+    if (!sessionAcceptsInput(activeSession())) return;
     const pasteboard = objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) objc.Id)(
         objc.cls("NSPasteboard"),
         objc.sel("generalPasteboard"),
@@ -5587,6 +5831,7 @@ fn fileDropAvailable(info: objc.Id) bool {
 
 fn viewFileDraggingUpdated(_: objc.Id, _: objc.Sel, info: objc.Id) callconv(.c) objc.NSUInteger {
     const session = fileDropSession(info) orelse return ns_drag_operation_none;
+    if (!sessionAcceptsInput(session)) return ns_drag_operation_none;
     if (session.exited.load(.acquire) or !fileDropAvailable(info)) return ns_drag_operation_none;
     return ns_drag_operation_copy;
 }
@@ -5653,6 +5898,7 @@ fn focusFileDropSession(session: *daemon_client.Session) void {
 
 fn viewPerformFileDrag(_: objc.Id, _: objc.Sel, info: objc.Id) callconv(.c) objc.BOOL {
     const session = fileDropSession(info) orelse return 0;
+    if (!sessionAcceptsInput(session)) return 0;
     if (session.exited.load(.acquire)) return 0;
     const payload = fileDropPayload(info) catch {
         NSBeep();
@@ -5981,6 +6227,10 @@ fn delegateWindowDidResize(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) voi
 
 fn delegateWillTerminate(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
     app.terminating.store(true, .release);
+    if (app.recovery_thread) |thread| {
+        thread.join();
+        app.recovery_thread = null;
+    }
     app.render_pending.store(false, .release);
     app.window_is_key = false;
     updateSessionFocus();
@@ -5996,6 +6246,7 @@ fn delegateWillTerminate(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void 
     stopDisplayLink();
     stopSyncOutputTimer();
     app.client.stopEvents();
+    for (app.sessions.sessions.items) |session| session.stopRefreshWorker();
     app.renderer.prepareForClientShutdown();
     for (app.sessions.sessions.items) |session| session.destroy();
     app.sessions.sessions.clearRetainingCapacity();
@@ -6298,6 +6549,7 @@ fn closeSearch(focus_terminal: bool) void {
 }
 
 fn showSearch() void {
+    if (!sessionAcceptsInput(activeSession())) return;
     if (!app.client.supportsSearch()) return NSBeep();
     if (app.search_bar.overlay == null or app.search_bar.field == null) return NSBeep();
     const id = activeSession().id;
@@ -6662,4 +6914,235 @@ fn addTargetedModifiedMenuItem(
         objc.sel("addItem:"),
         item,
     );
+}
+
+// Compiled only for -Drecovery-ui-smoke. The harness uses the actual native
+// buttons and event loop; no Accessibility or Screen Recording grant needed.
+var recovery_smoke_phase: u8 = 0;
+var recovery_smoke_ticks: usize = 0;
+var recovery_smoke_fresh_id: u64 = 0;
+
+fn startRecoverySmoke() void {
+    const home = app.env.get("HOME") orelse @panic("smoke HOME missing");
+    if (!std.mem.startsWith(u8, home, "/tmp/bt-gui-")) @panic("refusing non-fixture smoke workspace");
+    if (app.env.get("BT_UI_SKEW_EXPECTED") == null and
+        app.recovery_status.pending_count != (if (app.env.get("BT_UI_CAPACITY") != null) @as(u32, 1024) else 3)) @panic("refusing non-fixture recovery workspace");
+    const timer = objc.msg(*const fn (objc.Class, objc.Sel, objc.CGFloat, objc.Id, objc.Sel, objc.Id, objc.BOOL) callconv(.c) objc.Id)(objc.cls("NSTimer"), objc.sel("timerWithTimeInterval:target:selector:userInfo:repeats:"), 0.1, app.view, objc.sel("recoverySmokeTick:"), null, 1);
+    const loop = objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) objc.Id)(objc.cls("NSRunLoop"), objc.sel("mainRunLoop"));
+    objc.msg(*const fn (objc.Id, objc.Sel, objc.Id, objc.Id) callconv(.c) void)(loop, objc.sel("addTimer:forMode:"), timer, ns_run_loop_common_modes.*);
+}
+
+fn recoverySmokeTick(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
+    recovery_smoke_ticks += 1;
+    recoverySmokeStep() catch |err| {
+        std.log.err("recovery smoke failed at phase {d}: {s}", .{ recovery_smoke_phase, @errorName(err) });
+        std.process.exit(1);
+    };
+}
+
+fn smokeClick(button: objc.Id) void {
+    objc.setId(button, objc.sel("performClick:"), null);
+}
+
+fn smokeFile(name: []const u8, bytes: []const u8) !void {
+    const path = try std.fs.path.join(app.gpa, &.{ app.env.get("HOME").?, name });
+    defer app.gpa.free(path);
+    try std.Io.Dir.cwd().writeFile(app.io, .{ .sub_path = path, .data = bytes });
+}
+
+fn smokeCapture(view: objc.Id, name: []const u8) !void {
+    const bounds = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGRect)(view, objc.sel("bounds"));
+    const bitmap = objc.msg(*const fn (objc.Id, objc.Sel, objc.CGRect) callconv(.c) objc.Id)(view, objc.sel("bitmapImageRepForCachingDisplayInRect:"), bounds);
+    if (bitmap == null) return error.SmokeCaptureFailed;
+    objc.msg(*const fn (objc.Id, objc.Sel, objc.CGRect, objc.Id) callconv(.c) void)(view, objc.sel("cacheDisplayInRect:toBitmapImageRep:"), bounds, bitmap);
+    const properties = objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) objc.Id)(objc.cls("NSDictionary"), objc.sel("dictionary"));
+    const data = objc.msg(*const fn (objc.Id, objc.Sel, objc.NSUInteger, objc.Id) callconv(.c) objc.Id)(bitmap, objc.sel("representationUsingType:properties:"), 4, properties);
+    const path = try std.fs.path.join(app.gpa, &.{ app.env.get("HOME").?, name });
+    defer app.gpa.free(path);
+    const ns_path = objc.nsStringFromBytes(path);
+    defer objc.release(ns_path);
+    if (objc.msg(*const fn (objc.Id, objc.Sel, objc.Id, objc.BOOL) callconv(.c) objc.BOOL)(data, objc.sel("writeToFile:atomically:"), ns_path, 1) == 0) return error.SmokeCaptureFailed;
+}
+
+fn recoverySmokeStep() !void {
+    if (recovery_smoke_ticks > 600) return error.SmokeTimeout;
+    if (app.env.get("BT_UI_SKEW_EXPECTED")) |expected| return skewSmokeStep(try std.fmt.parseInt(u16, expected, 10));
+    if (app.env.get("BT_UI_CAPACITY") != null) return capacitySmokeStep();
+    switch (recovery_smoke_phase) {
+        0 => {
+            if (!app.recovery_banner.visible) return;
+            if (app.sessions.sessions.items.len != 1) return error.EagerRestore;
+            app.session_bar_visible = false;
+            layoutSessionBar();
+            renderNow();
+            if (!app.recovery_banner.visible) return error.HiddenBanner;
+            try smokeCapture(app.root_view, "01-offer.png");
+            const frame_view = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.Id)(app.root_view, objc.sel("superview"));
+            try smokeCapture(frame_view, "01-titlebar.png");
+            smokeResize(520, 420);
+            try smokeCapture(frame_view, "01-narrow.png");
+            smokeResize(964, 458);
+            smokeClick(app.recovery_banner.primary);
+            recovery_smoke_phase = 1;
+        },
+        1 => {
+            if (app.recovery_busy or app.sessions.sessions.items.len != 4) return;
+            if (activeSession().recovery_phase.load(.acquire) != .cwd_unavailable) return;
+            const left = sessionById(app.display_items.items[1].pair.left).?;
+            if (app.display_items.items[1].pair.zoomed) {
+                if (left.recovery_phase.load(.acquire) != .dormant or left.refresh_thread != null) return error.EagerZoomedShell;
+                viewTogglePairZoom(null, null, null);
+                return;
+            }
+            if (left.recovery_phase.load(.acquire) != .live) return;
+            const background = sessionById(app.display_items.items[2].single).?;
+            if (background.recovery_phase.load(.acquire) != .dormant or background.refresh_thread != null) return error.EagerBackgroundShell;
+            renderNow();
+            if (!app.recovery_panes[1].visible or app.recovery_banner.visible) return error.WrongPaneChrome;
+            try smokeCapture(app.root_view, "02-missing-folder.png");
+            smokeResize(520, 420);
+            try smokeCapture(app.root_view, "02-narrow-pair.png");
+            smokeResize(520, 136);
+            const minimum = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGSize)(app.window, objc.sel("contentMinSize"));
+            if (minimum.height < 136) return error.RecoveryControlsBelowMinimum;
+            try smokeCapture(app.root_view, "02-minimum-pair.png");
+            smokeResize(964, 458);
+            smokeClick(app.recovery_panes[1].primary);
+            recovery_smoke_phase = 2;
+        },
+        2 => {
+            if (activeSession().recovery_phase.load(.acquire) != .cwd_unavailable) return;
+            renderNow();
+            smokeClick(app.recovery_panes[1].secondary);
+            recovery_smoke_phase = 3;
+        },
+        3 => {
+            if (activeSession().recovery_phase.load(.acquire) != .live) return;
+            renderNow();
+            if (app.recovery_panes[1].visible) return error.StaleErrorPane;
+            try smokeCapture(app.root_view, "03-home-shell.png");
+            // The external driver waits for a durable four-entry checkpoint,
+            // then kills only the peer on this isolated fixture socket.
+            try smokeFile("ready-for-daemon-loss", "ready\n");
+            recovery_smoke_phase = 4;
+        },
+        4 => {
+            if (!app.client.isDisconnected()) return;
+            renderNow();
+            if (sessionAcceptsInput(activeSession()) or !app.recovery_banner.visible) return error.UnsafeDisconnectedInput;
+            try smokeCapture(app.root_view, "04-disconnected.png");
+            smokeClick(app.recovery_banner.primary);
+            recovery_smoke_phase = 5;
+        },
+        5 => {
+            if (app.recovery_busy or app.client.isDisconnected()) return;
+            renderNow();
+            if (app.sessions.sessions.items.len != 1 or app.recovery_status.pending_count != 4) return error.ReconnectLostWorkspace;
+            try smokeCapture(app.root_view, "05-reconnected-offer.png");
+            smokeClick(app.recovery_banner.secondary);
+            recovery_smoke_phase = 6;
+        },
+        6 => {
+            if (app.recovery_busy or app.recovery_status.pending_count != 0) return;
+            renderNow();
+            if (app.recovery_banner.visible) return error.DismissalNotVisible;
+            try smokeFile("smoke-success", "restore; hidden sidebar; paired error; retry; home; dormant background; daemon loss; reconnect; dismiss: passed\n");
+            delegateWillTerminate(null, null, null);
+            std.process.exit(0);
+        },
+        else => unreachable,
+    }
+}
+
+fn capacitySmokeStep() !void {
+    switch (recovery_smoke_phase) {
+        0 => {
+            if (!app.recovery_banner.visible) return;
+            if (app.sessions.sessions.items.len != 1) return error.WrongFreshCount;
+            recovery_smoke_fresh_id = activeSession().id;
+            smokeClick(app.recovery_banner.primary);
+            recovery_smoke_phase = 1;
+        },
+        1 => {
+            if (app.recovery_busy or app.sessions.sessions.items.len != 1025) return;
+            if (activeSession().recovery_phase.load(.acquire) != .live) return;
+            if (!app.recovery_status.failed or !app.recovery_banner.visible or app.recovery_status.pending_count != 0)
+                return error.CapacityNotReported;
+            var live: usize = 0;
+            for (app.sessions.sessions.items) |session| {
+                if (session.recovery_phase.load(.acquire) == .live) live += 1;
+            }
+            if (live != 2) return error.CapacitySpawnStorm;
+            try smokeCapture(app.root_view, "capacity-degraded.png");
+            _ = selectSessionId(recovery_smoke_fresh_id);
+            closeSession(app.sessions.active_index);
+            recovery_smoke_phase = 2;
+        },
+        2 => {
+            if (app.sessions.sessions.items.len != 1024 or app.recovery_status.failed) return;
+            if (app.recovery_banner.visible) return error.StaleCapacityBanner;
+            try smokeFile("smoke-success", "1024 restored; fresh shell preserved; degraded capacity shown; close recovers checkpointing: passed\n");
+            delegateWillTerminate(null, undefined, null);
+            std.process.exit(0);
+        },
+        else => unreachable,
+    }
+}
+
+fn skewSmokeStep(expected: u16) !void {
+    if (app.client.attachDialect() != expected) return error.UnexpectedAttachDialect;
+    const legacy = expected != daemon_protocol.version;
+    if (app.client.updatePending() != legacy) return error.IncorrectUpdateStatus;
+    if (app.sessions.sessions.items.len != 1) return error.UnexpectedSessionCount;
+    const ns_app = objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) objc.Id)(objc.cls("NSApplication"), objc.sel("sharedApplication"));
+    const menu = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.Id)(ns_app, objc.sel("mainMenu"));
+    const app_item = objc.msg(*const fn (objc.Id, objc.Sel, objc.NSInteger) callconv(.c) objc.Id)(menu, objc.sel("itemAtIndex:"), 0);
+    const submenu = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.Id)(app_item, objc.sel("submenu"));
+    const pending_item = objc.msg(*const fn (objc.Id, objc.Sel, objc.Id) callconv(.c) objc.Id)(submenu, objc.sel("itemWithTitle:"), objc.nsString("Background Service Update Pending…"));
+    if ((pending_item != null) != legacy) return error.IncorrectUpdateMenu;
+    if (!legacy) {
+        try smokeFile("skew-current-success", "current dialect and no pending menu\n");
+        delegateWillTerminate(null, undefined, null);
+        std.process.exit(0);
+    }
+    if (app.recovery_status.available) return error.LegacyRecoveryAdvertised;
+    const session = activeSession();
+    if (recovery_smoke_phase < 2) {
+        var snapshot = try app.client.snapshot(session.id);
+        defer snapshot.deinit(app.gpa);
+        const needle = if (recovery_smoke_phase == 0) "LEGACY_PERSISTED_OUTPUT" else "CURRENT_VIEWER_INPUT";
+        var matched: usize = 0;
+        var found = false;
+        for (snapshot.cells) |cell| {
+            if (cell.cp == needle[matched]) {
+                matched += 1;
+                if (matched == needle.len) {
+                    found = true;
+                    break;
+                }
+            } else matched = @intFromBool(cell.cp == needle[0]);
+        }
+        if (!found) return;
+        if (recovery_smoke_phase == 0) {
+            try app.client.writeInput(session.id, "printf '%s' $$ > \"$HOME/child-after.pid\"; printf 'CURRENT_VIEWER_%s\\n' INPUT\n");
+            recovery_smoke_phase = 1;
+        } else {
+            try smokeFile("skew-live-success", "retained output, current input, pending menu present\n");
+            recovery_smoke_phase = 2;
+        }
+        return;
+    }
+    const allow_close = try std.fs.path.join(app.gpa, &.{ app.env.get("HOME").?, "allow-close" });
+    defer app.gpa.free(allow_close);
+    std.Io.Dir.cwd().access(app.io, allow_close, .{}) catch return;
+    try app.client.closeSession(session.id);
+    delegateWillTerminate(null, undefined, null);
+    std.process.exit(0);
+}
+
+fn smokeResize(width: f64, height: f64) void {
+    objc.msg(*const fn (objc.Id, objc.Sel, objc.CGSize) callconv(.c) void)(app.window, objc.sel("setContentSize:"), .{ .width = width, .height = height });
+    layoutSessionBar();
+    syncSizes();
+    renderNow();
 }
