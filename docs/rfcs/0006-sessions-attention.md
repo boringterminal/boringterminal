@@ -7,9 +7,11 @@ the credibility work (RFC 0002/0003) is expensive.
 
 ## Sessions and the sidebar
 
-Titlebar session controls use an AppKit titlebar accessory, whose space is
-reserved by the window. Never insert controls at guessed coordinates beside
-the traffic lights: macOS title placement varies and can overlap those controls.
+Titlebar session controls use a **left-aligned** AppKit titlebar accessory,
+beside the traffic lights as specified below (placement clarified 2026-11-07).
+Its space is reserved by the window. Never insert controls at guessed
+coordinates beside the traffic lights: macOS title placement varies and can
+overlap those controls.
 Recovery chrome contributes to the window's minimum content height: reserve the
 banner plus the terminal minimum, and at least 136 points for a visible recovery
 pane so its stacked buttons remain reachable in a narrow window.

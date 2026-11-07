@@ -108,6 +108,23 @@ grid recomputation, and RFC 0014's coherent-geometry presentation barrier are
 one transaction, so text scaling never displays a stale grid under new cell
 metrics.
 
+### Temporary text-size feedback (amended 2026-11-07)
+
+Text-size shortcuts and their View-menu actions show a compact native hint at
+the bottom center of the terminal area: `108% · 14 pt`. The percentage is the
+effective size divided by configured `font-size`, rounded to a whole percent;
+point size retains a fractional digit when needed. Reset shows `100%` and the
+configured size, including when already at the default. Repeated actions update
+the same hint and restart its 1.2-second dismissal timer. Size limits retain
+their existing menu availability. Failed font changes never display an
+uncommitted size.
+
+The hint is native chrome with a fixed UI font size. It overlays the terminal
+without changing its grid or taking keyboard focus, and mouse events pass
+through it. It follows window/sidebar resizing, hides on window deactivation
+or a font-size config change, and cancels its timer on shutdown. It introduces
+no saved setting and no terminal/daemon protocol state.
+
 The `FontSet` resolves four terminal styles: regular, bold, italic, and bold
 italic. The regular configured/system face is authoritative for cell width,
 cell height, and baseline. CoreText may supply a styled face only when its

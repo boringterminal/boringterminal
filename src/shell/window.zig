@@ -26,6 +26,7 @@ const search_bar_mod = @import("search_bar.zig");
 const hyperlink_mod = @import("hyperlink.zig");
 const path_drop = @import("path_drop.zig");
 const font_zoom = @import("font_zoom.zig");
+const font_zoom_hint = @import("font_zoom_hint.zig");
 
 extern "c" fn NSBeep() void;
 extern "c" fn CGEventSourceFlagsState(state_id: u32) u64;
@@ -164,6 +165,8 @@ const App = struct {
     renderer: renderer_mod.Renderer,
     config: config_mod.Config,
     font_zoom: font_zoom.State = .{},
+    font_zoom_hint: font_zoom_hint.Hint = .{},
+    font_zoom_hint_timer: objc.Id = null,
     config_path: []u8,
     config_directory: []u8,
     config_watcher: ?*config_watcher.Watcher = null,
@@ -1233,7 +1236,10 @@ fn reloadConfig() void {
 
     var previous = app.config;
     app.config = candidate;
-    if (size_changed) app.font_zoom.reset();
+    if (size_changed) {
+        app.font_zoom.reset();
+        hideFontZoomHint();
+    }
     candidate_owned = false;
     previous.deinit(app.gpa);
 
@@ -1254,7 +1260,10 @@ fn setTemporaryFontSize(size: ?f32) void {
         config_mod.min_font_size,
         config_mod.max_font_size,
     );
-    if (target == effectiveFontSize() and ((size == null) == (!app.font_zoom.isOverridden()))) return;
+    if (target == effectiveFontSize() and ((size == null) == (!app.font_zoom.isOverridden()))) {
+        showFontZoomHint();
+        return;
+    }
     app.renderer.reconfigureFont(.{
         .family = app.config.font_family,
         .size = target,
@@ -1266,11 +1275,57 @@ fn setTemporaryFontSize(size: ?f32) void {
     layoutSessionBar();
     syncSizes();
     scheduleRender();
+    showFontZoomHint();
 }
 
 fn adjustTemporaryFontSize(delta: f32) void {
-    const target = app.font_zoom.adjusted(app.config.font_size, delta) orelse return NSBeep();
+    const target = app.font_zoom.adjusted(app.config.font_size, delta) orelse {
+        showFontZoomHint();
+        return NSBeep();
+    };
     setTemporaryFontSize(target);
+}
+
+fn hideFontZoomHint() void {
+    if (app.font_zoom_hint_timer) |timer| {
+        objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) void)(timer, objc.sel("invalidate"));
+        app.font_zoom_hint_timer = null;
+    }
+    app.font_zoom_hint.hide();
+}
+
+fn showFontZoomHint() void {
+    hideFontZoomHint();
+    if (app.font_zoom_hint.view == null) return;
+    const timer = objc.msg(
+        *const fn (objc.Class, objc.Sel, objc.CGFloat, objc.Id, objc.Sel, objc.Id, objc.BOOL) callconv(.c) objc.Id,
+    )(
+        objc.cls("NSTimer"),
+        objc.sel("timerWithTimeInterval:target:selector:userInfo:repeats:"),
+        1.2,
+        app.view,
+        objc.sel("fontZoomHintExpired:"),
+        null,
+        0,
+    );
+    if (timer == null) return;
+    app.font_zoom_hint_timer = timer;
+    app.font_zoom_hint.show(effectiveFontSize(), app.config.font_size);
+    layoutFontZoomHint();
+    const loop = objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) objc.Id)(objc.cls("NSRunLoop"), objc.sel("mainRunLoop"));
+    objc.msg(*const fn (objc.Id, objc.Sel, objc.Id, objc.Id) callconv(.c) void)(loop, objc.sel("addTimer:forMode:"), timer, ns_run_loop_common_modes.*);
+}
+
+fn fontZoomHintExpired(_: objc.Id, _: objc.Sel, timer: objc.Id) callconv(.c) void {
+    if (timer != app.font_zoom_hint_timer) return;
+    app.font_zoom_hint_timer = null;
+    app.font_zoom_hint.hide();
+}
+
+fn layoutFontZoomHint() void {
+    if (app.view == null) return;
+    const frame = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGRect)(app.view, objc.sel("frame"));
+    app.font_zoom_hint.layout(frame);
 }
 
 fn userDefaults() objc.Id {
@@ -2670,7 +2725,7 @@ fn installTitlebarControls() void {
     defer objc.release(titlebar);
     setViewFrame(titlebar, recovery_ui.rect(0, 0, 64, 28));
     objc.setId(accessory, objc.sel("setView:"), titlebar);
-    objc.setU(accessory, objc.sel("setLayoutAttribute:"), 2); // NSLayoutAttributeRight
+    objc.setU(accessory, objc.sel("setLayoutAttribute:"), 1); // NSLayoutAttributeLeft, beside traffic lights
     objc.setId(app.window, objc.sel("addTitlebarAccessoryViewController:"), accessory);
     const button_size: f32 = 24;
     const y: f32 = 2;
@@ -3232,6 +3287,7 @@ fn buildWindow() !void {
     try app.recovery_banner.init(root, view, "restoreSessions:", "dismissRecovery:");
     app.recovery_banner.banner = true;
     for (&app.recovery_panes) |*pane| try pane.init(root, view, "retryRecovery:", "recoveryHome:");
+    try app.font_zoom_hint.init(root);
     objc.setId(window, objc.sel("setContentView:"), root);
     objc.setU(window, objc.sel("setAcceptsMouseMovedEvents:"), 1);
     installTitlebarControls();
@@ -3283,6 +3339,7 @@ fn syncSizes() void {
     app.view_size = .{ w, h };
     layoutPairDivider();
     layoutSearchOverlay();
+    layoutFontZoomHint();
 
     const transaction = objc.cls("CATransaction");
     objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) void)(transaction, objc.sel("begin"));
@@ -3784,6 +3841,7 @@ fn makeViewClass() objc.Class {
     objc.addMethod(class, objc.sel("increaseFontSize:"), @ptrCast(@constCast(&viewIncreaseFontSize)), "v@:@");
     objc.addMethod(class, objc.sel("decreaseFontSize:"), @ptrCast(@constCast(&viewDecreaseFontSize)), "v@:@");
     objc.addMethod(class, objc.sel("resetFontSize:"), @ptrCast(@constCast(&viewResetFontSize)), "v@:@");
+    objc.addMethod(class, objc.sel("fontZoomHintExpired:"), @ptrCast(@constCast(&fontZoomHintExpired)), "v@:@");
     objc.addMethod(class, objc.sel("validateMenuItem:"), @ptrCast(@constCast(&viewValidateMenuItem)), "c@:@");
     objc.addMethod(class, objc.sel("openConfiguration:"), @ptrCast(@constCast(&viewOpenConfiguration)), "v@:@");
     objc.addMethod(class, objc.sel("showBackgroundServiceUpdate:"), @ptrCast(@constCast(&viewShowBackgroundServiceUpdate)), "v@:@");
@@ -4794,7 +4852,7 @@ fn viewValidateMenuItem(_: objc.Id, _: objc.Sel, item: objc.Id) callconv(.c) obj
     if (action == objc.sel("decreaseFontSize:"))
         return @intFromBool(effectiveFontSize() > config_mod.min_font_size);
     if (action == objc.sel("resetFontSize:"))
-        return @intFromBool(app.font_zoom.isOverridden());
+        return 1; // Actual Size also confirms 100% when already at the default.
     return 1;
 }
 
@@ -6253,6 +6311,7 @@ fn delegateWindowDidBecomeKey(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) 
 fn delegateWindowDidResignKey(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
     app.window_is_key = false;
     app.preedit.clear();
+    hideFontZoomHint();
     updateSessionFocus();
     scheduleRender();
 }
@@ -6265,6 +6324,7 @@ fn delegateWindowDidResize(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) voi
 
 fn delegateWillTerminate(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
     app.terminating.store(true, .release);
+    hideFontZoomHint();
     if (app.recovery_thread) |thread| {
         thread.join();
         app.recovery_thread = null;
