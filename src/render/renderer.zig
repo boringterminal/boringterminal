@@ -329,6 +329,22 @@ pub const Renderer = struct {
         previous_atlas.deinit();
         previous_fonts.deinit();
 
+        self.clearFrameLists();
+    }
+
+    /// Display changes invalidate raster resolution, not the selected font or
+    /// zoom. Publish only after both replacement atlas textures exist.
+    pub fn setPixelScale(self: *Renderer, pixel_scale: f32) !void {
+        if (self.pixel_scale == pixel_scale) return;
+        const replacement = try atlas_mod.GlyphAtlas.init(self.alloc, self.device, 1024, pixel_scale);
+        var previous = self.atlas;
+        self.atlas = replacement;
+        self.pixel_scale = pixel_scale;
+        previous.deinit();
+        self.clearFrameLists();
+    }
+
+    fn clearFrameLists(self: *Renderer) void {
         // No instance may retain dimensions or UVs from the old font state.
         self.bg_list.clearRetainingCapacity();
         self.decor_list.clearRetainingCapacity();
@@ -337,6 +353,15 @@ pub const Renderer = struct {
         self.image_draws.clearRetainingCapacity();
         self.active_image_refs.clearRetainingCapacity();
         self.pane_batches.clearRetainingCapacity();
+    }
+
+    fn glyphOrigin(self: *const Renderer, x: f32, y: f32, glyph: atlas_mod.AtlasEntry) [2]f32 {
+        const origin: [2]f32 = .{ x + glyph.bearing_x, y + self.fonts.cellTopForBearing(glyph.bearing_y) };
+        if (!glyph.snap_to_pixels) return origin;
+        return .{
+            @round(origin[0] * self.pixel_scale) / self.pixel_scale,
+            @round(origin[1] * self.pixel_scale) / self.pixel_scale,
+        };
     }
 
     /// Build instance lists from a renderer-compatible grid source. Called
@@ -573,7 +598,7 @@ pub const Renderer = struct {
                         if (glyph.width > 0 and glyph.height > 0) {
                             const opacity: f32 = if (cell.flags.dim) 0.6 else 1;
                             const instance: GlyphInstance = .{
-                                .origin = .{ x + glyph.bearing_x, y + self.fonts.cellTopForBearing(glyph.bearing_y) },
+                                .origin = self.glyphOrigin(x, y, glyph),
                                 .size = .{ glyph.width, glyph.height },
                                 .uv = .{ glyph.u0, glyph.v0, glyph.u1, glyph.v1 },
                                 .color = rgba(fg, opacity),
@@ -702,7 +727,7 @@ pub const Renderer = struct {
             );
             if (glyph.width > 0 and glyph.height > 0) {
                 const instance: GlyphInstance = .{
-                    .origin = .{ x + glyph.bearing_x, y + self.fonts.cellTopForBearing(glyph.bearing_y) },
+                    .origin = self.glyphOrigin(x, y, glyph),
                     .size = .{ glyph.width, glyph.height },
                     .uv = .{ glyph.u0, glyph.v0, glyph.u1, glyph.v1 },
                     .color = rgba(theme.fg, 1),
@@ -1682,6 +1707,53 @@ test "OSC 8 hover decorates only the matching semantic range" {
     try std.testing.expectEqual(@as(u32, 0), terminal.term.viewCellAt(1, 2).hyperlink_id);
 }
 
+test "CoreText masks reach backing pixels unchanged across display scales" {
+    const alloc = std.testing.allocator;
+    const options: FontOptions = .{ .family = "Menlo", .size = 13 };
+    var renderer = Renderer.init(alloc, options, 1) catch |err| switch (err) {
+        error.NoMetalDevice => return error.SkipZigTest,
+        else => return err,
+    };
+    defer renderer.deinit();
+    var terminal = try vt.Vt.init(alloc, 8, 2);
+    defer terminal.deinit();
+    terminal.feed("\x1b[38;2;255;255;255m\x1b[48;2;0;0;0m M M M ");
+
+    for ([_]f32{ 1, 2, 1 }) |scale| {
+        if (renderer.pixel_scale != scale) {
+            try renderer.setPixelScale(scale);
+            try std.testing.expectEqual(@as(usize, 0), renderer.atlas.mask_entries.count());
+            try std.testing.expectEqual(@as(usize, 0), renderer.glyph_list.items.len);
+        }
+        try renderer.buildFrame(terminal.term, false);
+        try std.testing.expectEqual(@as(usize, 3), renderer.glyph_list.items.len);
+        const ref = renderer.fonts.glyphFor('M', .regular, 1).?;
+        var raster = try renderer.fonts.rasterize(ref, scale, alloc);
+        defer raster.deinit(alloc);
+        var image = try renderer.renderOffscreen(alloc, .{ 128, 32 }, @intFromFloat(128 * scale), @intFromFloat(32 * scale));
+        defer image.deinit();
+        for (renderer.glyph_list.items) |glyph| {
+            const px = glyph.origin[0] * scale;
+            const py = glyph.origin[1] * scale;
+            try std.testing.expectApproxEqAbs(@round(px), px, 0.0001);
+            try std.testing.expectApproxEqAbs(@round(py), py, 0.0001);
+            const x0: usize = @intFromFloat(@round(px));
+            const y0: usize = @intFromFloat(@round(py));
+            for (0..raster.height) |y| {
+                for (0..raster.width) |x| {
+                    const coverage = raster.bytes[y * raster.width + x];
+                    const offset = ((y0 + y) * image.width + x0 + x) * 4;
+                    for (image.pixels[offset..][0..3]) |channel| {
+                        // UNorm blending may round by one byte; any additional
+                        // interpolation of the source mask is a regression.
+                        try std.testing.expect(@abs(@as(i16, channel) - @as(i16, coverage)) <= 1);
+                    }
+                }
+            }
+        }
+    }
+}
+
 test "offscreen Metal golden: mask glyphs and decorations" {
     const alloc = std.testing.allocator;
     var renderer = Renderer.init(alloc, .{ .family = "Menlo", .size = 13 }, 1) catch |err| switch (err) {
@@ -1697,7 +1769,7 @@ test "offscreen Metal golden: mask glyphs and decorations" {
 
     var image = try renderGolden(&renderer, terminal.term, false);
     defer image.deinit();
-    try expectSystemGolden(&image, 63, 32, 9997305713237981640);
+    try expectSystemGolden(&image, 63, 32, 3113125521224138266);
 }
 
 test "offscreen Metal golden: mixed fallback and color glyphs" {
@@ -1715,7 +1787,7 @@ test "offscreen Metal golden: mixed fallback and color glyphs" {
 
     var image = try renderGolden(&renderer, terminal.term, false);
     defer image.deinit();
-    try expectSystemGolden(&image, 94, 32, 6411646892288276539);
+    try expectSystemGolden(&image, 94, 32, 3192194463298676531);
 }
 
 test "offscreen Metal draws a Kitty image above terminal cells" {

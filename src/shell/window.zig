@@ -3253,6 +3253,26 @@ fn buildWindow() !void {
 
 /// Recompute drawable size and grid dimensions from the view bounds.
 fn syncSizes() void {
+    if (app.view == null or app.layer == null) return;
+    // Frame changes alone do not cover a move between 1x and 2x displays.
+    // Also run from viewDidChangeBackingProperties, and at initial attach.
+    const window = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.Id)(
+        app.view,
+        objc.sel("window"),
+    );
+    if (window != null) {
+        const scale: f32 = @floatCast(objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGFloat)(
+            window,
+            objc.sel("backingScaleFactor"),
+        ));
+        if (std.math.isFinite(scale) and scale > 0 and scale != app.scale) {
+            app.renderer.setPixelScale(scale) catch |err| {
+                std.log.err("keeping current backing scale; atlas rebuild failed: {s}", .{@errorName(err)});
+                return;
+            };
+            app.scale = scale;
+        }
+    }
     const bounds = objc.msg(*const fn (objc.Id, objc.Sel) callconv(.c) objc.CGRect)(
         app.view,
         objc.sel("bounds"),
@@ -3264,6 +3284,15 @@ fn syncSizes() void {
     layoutPairDivider();
     layoutSearchOverlay();
 
+    const transaction = objc.cls("CATransaction");
+    objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) void)(transaction, objc.sel("begin"));
+    objc.msg(*const fn (objc.Class, objc.Sel, objc.BOOL) callconv(.c) void)(transaction, objc.sel("setDisableActions:"), 1);
+    defer objc.msg(*const fn (objc.Class, objc.Sel) callconv(.c) void)(transaction, objc.sel("commit"));
+    objc.msg(*const fn (objc.Id, objc.Sel, objc.CGFloat) callconv(.c) void)(
+        app.layer,
+        objc.sel("setContentsScale:"),
+        @floatCast(app.scale),
+    );
     objc.msg(*const fn (objc.Id, objc.Sel, objc.CGSize) callconv(.c) void)(
         app.layer,
         objc.sel("setDrawableSize:"),
@@ -3767,6 +3796,7 @@ fn makeViewClass() objc.Class {
     objc.addMethod(class, objc.sel("control:textView:doCommandBySelector:"), @ptrCast(@constCast(&viewSearchCommand)), "c@:@@:");
     objc.addMethod(class, objc.sel("viewWillStartLiveResize"), @ptrCast(@constCast(&viewWillStartLiveResize)), "v@:");
     objc.addMethod(class, objc.sel("viewDidEndLiveResize"), @ptrCast(@constCast(&viewDidEndLiveResize)), "v@:");
+    objc.addMethod(class, objc.sel("viewDidChangeBackingProperties"), @ptrCast(@constCast(&viewDidChangeBackingProperties)), "v@:");
 
     // NSTextInputClient.
     objc.addMethod(class, objc.sel("insertText:replacementRange:"), @ptrCast(@constCast(&tiInsertText)), "v@:@{_NSRange=QQ}");
@@ -5936,6 +5966,14 @@ fn viewFrameChanged(_: objc.Id, _: objc.Sel, _: objc.Id) callconv(.c) void {
 fn callSuperVoid(self: objc.Id, selector: objc.Sel) void {
     var super_ctx: objc.Super = .{ .receiver = self, .super_class = objc.cls("NSView") };
     objc.msgSuper(*const fn (*objc.Super, objc.Sel) callconv(.c) void)(&super_ctx, selector);
+}
+
+fn viewDidChangeBackingProperties(self: objc.Id, selector: objc.Sel) callconv(.c) void {
+    callSuperVoid(self, selector);
+    if (self != app.view or app.layer == null) return;
+    clearHyperlinkHover();
+    syncSizes();
+    scheduleRender();
 }
 
 fn viewWillStartLiveResize(self: objc.Id, selector: objc.Sel) callconv(.c) void {

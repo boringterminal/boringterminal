@@ -23,6 +23,9 @@ pub const AtlasEntry = struct {
     bearing_x: f32,
     bearing_y: f32,
     format: font_mod.RasterFormat,
+    /// Cell-filling built-ins keep fractional layout geometry; font bitmaps
+    /// are placed at backing-pixel boundaries without resampling.
+    snap_to_pixels: bool = true,
 };
 
 const Slot = struct { x: u32, y: u32 };
@@ -122,6 +125,14 @@ pub const GlyphAtlas = struct {
         if (font_mod.isBuiltin(ref)) {
             entry.width = fonts.metrics.cell_width;
             entry.height = fonts.metrics.cell_height;
+            entry.snap_to_pixels = false;
+            // Cell rasters can be scaled to fractional widths. Keep their
+            // edge samples inside the bitmap so adjacent cells meet.
+            const half_texel = 0.5 / @as(f32, @floatFromInt(self.mask.size));
+            entry.u0 += half_texel;
+            entry.v0 += half_texel;
+            entry.u1 -= half_texel;
+            entry.v1 -= half_texel;
         }
         switch (raster.format) {
             .mask => try self.mask_entries.putNoClobber(self.alloc, ref, entry),
@@ -170,12 +181,12 @@ pub const GlyphAtlas = struct {
         const inv_size: f32 = 1.0 / @as(f32, @floatFromInt(atlas_page.size));
         const inv_scale: f32 = 1.0 / self.pixel_scale;
         return .{
-            // Sampling texel centers avoids blending against the one-pixel
-            // packing gap, which otherwise creates seams at cell edges.
-            .u0 = (@as(f32, @floatFromInt(slot.x)) + 0.5) * inv_size,
-            .v0 = (@as(f32, @floatFromInt(slot.y)) + 0.5) * inv_size,
-            .u1 = (@as(f32, @floatFromInt(slot.x + raster.width)) - 0.5) * inv_size,
-            .v1 = (@as(f32, @floatFromInt(slot.y + raster.height)) - 0.5) * inv_size,
+            // Quad edges map to texel edges. At 1:1 scale, fragment centers
+            // then hit texel centers without filtering the mask a second time.
+            .u0 = @as(f32, @floatFromInt(slot.x)) * inv_size,
+            .v0 = @as(f32, @floatFromInt(slot.y)) * inv_size,
+            .u1 = @as(f32, @floatFromInt(slot.x + raster.width)) * inv_size,
+            .v1 = @as(f32, @floatFromInt(slot.y + raster.height)) * inv_size,
             .width = @as(f32, @floatFromInt(raster.width)) * inv_scale,
             .height = @as(f32, @floatFromInt(raster.height)) * inv_scale,
             .bearing_x = raster.bearing_x,

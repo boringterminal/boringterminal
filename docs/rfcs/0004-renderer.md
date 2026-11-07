@@ -102,6 +102,34 @@ Every connector, including each rule of a double line, reaches its cell edge.
 The built-in range is exhaustive once landed: `supports()` must accept every
 codepoint from `U+2500` through `U+259F` and reject adjacent codepoints.
 
+## Display scale and text sampling (amended 2026-11-07)
+
+The window's current backing scale owns both glyph raster resolution and the
+CAMetalLayer contents/drawable scale. Synchronize it when attaching the view
+and when AppKit reports changed backing properties, including display moves
+that leave the point-space view size unchanged. Rebuild both glyph atlases
+before publishing a new scale; a failed allocation keeps the previous coherent
+renderer state. Refresh drawable and PTY pixel dimensions and request a frame
+even when the terminal's row/column count is unchanged. Font zoom is preserved.
+This follows Apple's CAMetalLayer `drawableSize`/CALayer `contentsScale`
+contracts and Ghostty's `SurfaceView_AppKit.viewDidChangeBackingProperties`.
+
+CoreText glyph bitmaps must reach the drawable without a second smoothing
+pass. Their quad origins are rounded to backing-pixel boundaries (including
+the baseline and pane offset), and atlas UVs describe texel **edges**. Fragment
+centers then sample texel centers at 1:1 scale. Insetting both UV endpoints by
+half a texel instead stretches N-1 texels over N pixels and blurs the bitmap.
+This applies to scalar, cluster, color, and IME glyphs. Cell layout retains its
+point-space metrics. Built-in box/block rasters retain cell-filling geometry
+and inset UVs because their fractional cell widths can require resampling;
+their edge-to-edge continuity is a separate contract.
+
+Regression coverage compares production Metal output against the source
+CoreText coverage at 1x and 2x, including repeated glyphs at fractional cell
+advances and a 1x→2x→1x atlas rebuild. Hardware acceptance additionally moves
+the window between displays of different scales without resizing it and
+checks display-mode changes while open.
+
 ## Frame pipeline
 
 Frame = pure function of (grid snapshot, cursor, selection, viewport). Two
